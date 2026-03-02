@@ -1,0 +1,48 @@
+# config/settings.example.yaml
+exchange:
+  name: bybit
+  testnet: true
+  api_key: "YOUR_API_KEY_HERE"
+  api_secret: "YOUR_API_SECRET_HERE"
+  rate_limit: 950
+  max_retries: 3
+  retry_delay: 0.1
+  ws_channel_type: "linear"
+  ws_ping_interval: 20
+  ws_reconnect_delay: 5
+  ws_max_reconnect_attempts: 50
+  ws_trace_logging: false
+
+latency:
+  warn_threshold_ms: 300
+  critical_threshold_ms: 500
+  emergency_threshold_ms: 1000
+  check_interval: 5
+  track_order_rtt: true
+  rtt_window_size: 100
+
+pairs:
+  market_type: futures
+  quote: usdt
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  max_active: 15
+
+logging:
+  level: INFO
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+  file: "logs/bot.log"
+  max_size_mb: 50
+  backup_count: 5
+
+monitoring:
+  telegram:
+    enabled: false
+    bot_token: "YOUR_BOT_TOKEN"
+    chat_id: "YOUR_CHAT_ID"
+    alert_on_trade: true
+    alert_on_error: true
+    alert_on_latency: true
+
+strategy_path: "config/strategies/hybrid.yaml"
