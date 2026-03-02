@@ -1,0 +1,32 @@
+# docker-compose.yaml
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: hybrid_bot
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=UTC
+    # Для будущей TimescaleDB
+    # depends_on:
+    #   - timescaledb
+    
+  # timescaledb:
+  #   image: timescale/timescaledb:latest-pg16
+  #   container_name: hybrid_db
+  #   ports:
+  #     - "5432:5432"
+  #   environment:
+  #     POSTGRES_PASSWORD: botpassword
+  #     POSTGRES_DB: hybrid_bot
+  #   volumes:
+  #     - timescale_data:/var/lib/postgresql/data
+
+# volumes:
+#   timescale_data:
