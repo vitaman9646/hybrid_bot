@@ -1,0 +1,53 @@
+# config/settings.yaml
+exchange:
+  name: bybit
+  testnet: true
+  api_key: "YOUR_API_KEY"
+  api_secret: "YOUR_API_SECRET"
+  
+  # Rate limiting
+  rate_limit: 950          # max requests per minute (Bybit limit = 1000)
+  max_retries: 3
+  retry_delay: 0.1         # seconds, multiplied by attempt number
+  
+  # WebSocket
+  ws_channel_type: "linear"
+  ws_ping_interval: 20     # seconds
+  ws_reconnect_delay: 5    # seconds
+  ws_max_reconnect_attempts: 50
+  ws_trace_logging: false
+
+latency:
+  # Градация по твоему предложению
+  warn_threshold_ms: 300       # приостановить новые входы
+  critical_threshold_ms: 500   # отменить pending + close if drawdown
+  emergency_threshold_ms: 1000 # emergency stop всего бота
+  check_interval: 5            # seconds between checks
+  
+  # Round-trip tracking
+  track_order_rtt: true
+  rtt_window_size: 100         # последние N ордеров для статистики
+
+pairs:
+  market_type: futures
+  quote: usdt
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  max_active: 15
+
+logging:
+  level: INFO
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+  file: "logs/bot.log"
+  max_size_mb: 50
+  backup_count: 5
+
+monitoring:
+  telegram:
+    enabled: false
+    bot_token: "YOUR_BOT_TOKEN"
+    chat_id: "YOUR_CHAT_ID"
+    alert_on_trade: true
+    alert_on_error: true
+    alert_on_latency: true
