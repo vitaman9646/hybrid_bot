@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import logging
 import signal as os_signal  # переименовали чтобы не конфликтовать с models.signals
 import sys
@@ -147,6 +148,10 @@ class HybridEngine:
         )
         self.aggregator.on_signal(self._on_aggregated_signal)
         self.aggregator.on_opposite_exit(self._on_opposite_exit)
+
+        # Дедупликация алертов: symbol → last_alert_ts
+        self._alert_dedup: dict[str, float] = {}
+        self._alert_dedup_ttl: float = 60.0  # секунд между алертами на один символ
 
         # 9. Filter Pipeline (Фаза 3)
         self.filter_pipeline = FilterPipeline(
@@ -400,17 +405,24 @@ class HybridEngine:
             f"tp={signal.tp_price:.2f} "
             f"confidence={signal.confidence:.2f}"
         )
-        asyncio.create_task(
-            self.alerts.send(
-                f"?? <b>Signal [{signal.scenario.value}]</b>\n"
-                f"Symbol: {signal.symbol}\n"
-                f"Direction: {signal.direction.value.upper()}\n"
-                f"Entry: {signal.entry_price:.2f}\n"
-                f"TP: {signal.tp_price:.2f}\n"
-                f"Confidence: {signal.confidence:.2f}\n"
-                f"Score: {signal.score:.2f}"
+        # Алерт с дедупликацией
+        now = time.time()
+        last_alert = self._alert_dedup.get(signal.symbol, 0)
+        if now - last_alert >= self._alert_dedup_ttl:
+            self._alert_dedup[signal.symbol] = now
+            asyncio.create_task(
+                self.alerts.send(
+                    f"?? <b>Signal [{signal.scenario.value}]</b>\n"
+                    f"Symbol: {signal.symbol}\n"
+                    f"Direction: {signal.direction.value.upper()}\n"
+                    f"Entry: {signal.entry_price:.2f}\n"
+                    f"TP: {signal.tp_price:.2f}\n"
+                    f"Confidence: {signal.confidence:.2f}\n"
+                    f"Score: {signal.score:.2f}"
+                )
             )
-        )
+        else:
+            logger.debug("Alert dedup %s: %.0fs ago", signal.symbol, now - last_alert)
 
         # Проверяем паузу
         if self.telegram_commands.is_paused:

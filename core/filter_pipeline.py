@@ -57,6 +57,7 @@ class FilterPipeline:
         self._time_block_start = cfg.get('time_block_start_utc', 2)   # час
         self._time_block_end = cfg.get('time_block_end_utc', 6)        # час
         self._time_filter_enabled = cfg.get('time_filter_enabled', True)
+        self._weekend_filter_enabled = cfg.get('weekend_filter_enabled', True)
 
         # FundingRate
         self._max_funding_rate = cfg.get('max_funding_rate', 0.001)    # 0.1%
@@ -237,7 +238,18 @@ class FilterPipeline:
     # ------------------------------------------------------------------
 
     def _check_time_of_day(self) -> FilterResult:
-        hour = datetime.now(timezone.utc).hour
+        now = datetime.now(timezone.utc)
+        hour = now.hour
+        weekday = now.weekday()  # 0=Mon, 5=Sat, 6=Sun
+
+        # Weekend фильтр (суббота и воскресенье)
+        if self._weekend_filter_enabled and weekday >= 5:
+            return FilterResult(
+                passed=False,
+                reason=f"weekend filter (weekday={weekday}, {now.strftime('%A')})",
+            )
+
+        # Ночной фильтр
         start = self._time_block_start
         end = self._time_block_end
         if start <= hour < end:

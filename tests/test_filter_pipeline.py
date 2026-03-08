@@ -33,7 +33,7 @@ def test_time_filter_blocks_in_window(monkeypatch):
     monkeypatch.setattr(
         'core.filter_pipeline.datetime',
         type('dt', (), {
-            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 3})())
+            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 3, 'weekday': lambda self: 0, 'strftime': lambda self, f: 'Monday'})())
         })
     )
     fp = make_pipeline(time_filter_enabled=True, time_block_start_utc=2, time_block_end_utc=6)
@@ -46,7 +46,7 @@ def test_time_filter_passes_outside_window(monkeypatch):
     monkeypatch.setattr(
         'core.filter_pipeline.datetime',
         type('dt', (), {
-            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 10})())
+            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 10, 'weekday': lambda self: 0, 'strftime': lambda self, f: 'Monday'})())
         })
     )
     fp = make_pipeline(time_filter_enabled=True, time_block_start_utc=2, time_block_end_utc=6)
@@ -58,7 +58,7 @@ def test_time_filter_boundary_start(monkeypatch):
     monkeypatch.setattr(
         'core.filter_pipeline.datetime',
         type('dt', (), {
-            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 2})())
+            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 2, 'weekday': lambda self: 0, 'strftime': lambda self, f: 'Monday'})())
         })
     )
     fp = make_pipeline(time_filter_enabled=True, time_block_start_utc=2, time_block_end_utc=6)
@@ -70,7 +70,7 @@ def test_time_filter_boundary_end(monkeypatch):
     monkeypatch.setattr(
         'core.filter_pipeline.datetime',
         type('dt', (), {
-            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 6})())
+            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 6, 'weekday': lambda self: 0, 'strftime': lambda self, f: 'Monday'})())
         })
     )
     fp = make_pipeline(time_filter_enabled=True, time_block_start_utc=2, time_block_end_utc=6)
@@ -236,7 +236,7 @@ async def test_check_passes_clean_signal(monkeypatch):
     monkeypatch.setattr(
         'core.filter_pipeline.datetime',
         type('dt', (), {
-            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 10})())
+            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 10, 'weekday': lambda self: 0, 'strftime': lambda self, f: 'Monday'})())
         })
     )
     fp = make_pipeline(
@@ -259,7 +259,7 @@ async def test_check_blocked_by_time(monkeypatch):
     monkeypatch.setattr(
         'core.filter_pipeline.datetime',
         type('dt', (), {
-            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 3})())
+            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 3, 'weekday': lambda self: 0, 'strftime': lambda self, f: 'Monday'})())
         })
     )
     fp = make_pipeline(time_filter_enabled=True, funding_filter_enabled=False, mark_filter_enabled=False)
@@ -274,7 +274,7 @@ async def test_check_penalty_reduces_confidence(monkeypatch):
     monkeypatch.setattr(
         'core.filter_pipeline.datetime',
         type('dt', (), {
-            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 10})())
+            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 10, 'weekday': lambda self: 0, 'strftime': lambda self, f: 'Monday'})())
         })
     )
     fp = make_pipeline(
@@ -307,7 +307,7 @@ async def test_check_stats_tracking(monkeypatch):
     monkeypatch.setattr(
         'core.filter_pipeline.datetime',
         type('dt', (), {
-            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 10})())
+            'now': staticmethod(lambda tz=None: type('t', (), {'hour': 10, 'weekday': lambda self: 0, 'strftime': lambda self, f: 'Monday'})())
         })
     )
     fp = make_pipeline(

@@ -114,6 +114,8 @@ class PositionManager:
         self._trailing_enabled: bool = trailing_cfg.get('enabled', True)
         self._trailing_adaptive: bool = trailing_cfg.get('adaptive', True)
         self._trailing_spread: float = trailing_cfg.get('spread', 0.3)  # %
+        # Trailing активируется только после движения в плюс на X%
+        self._trailing_activation_pct: float = trailing_cfg.get('activation_pct', 0.4)
 
         # Лимиты
         self._max_positions: int = config.get('max_positions', 5)
@@ -182,7 +184,7 @@ class PositionManager:
         # Считаем цены
         entry = signal.entry_price
         tp = self._calc_tp(direction, entry, signal.tp_price)
-        sl = self._calc_sl(direction, entry)
+        sl = self._calc_sl(direction, entry, symbol)
 
         # Получаем qty — используем size_usdt из RiskManager если задан
         size_usdt = signal.size_usdt if signal.size_usdt > 0 else self._size_usdt
@@ -515,8 +517,18 @@ class PositionManager:
     async def _update_trailing(self, pos: Position, price: float):
         """
         Двигаем trailing stop за ценой.
+        Активируется только после движения на activation_pct в плюс.
         Адаптивный spread через VolatilityTracker если включён.
         """
+        # Проверяем активацию trailing — только после +activation_pct
+        if pos.direction == 'long':
+            profit_pct = (price - pos.entry_price) / pos.entry_price * 100
+        else:
+            profit_pct = (pos.entry_price - price) / pos.entry_price * 100
+
+        if profit_pct < self._trailing_activation_pct:
+            return  # ещё не активирован
+
         spread_pct = self._get_trailing_spread(pos.symbol)
 
         if pos.direction == 'long':
@@ -584,10 +596,28 @@ class PositionManager:
             return entry * (1 + self._tp_pct / 100)
         return entry * (1 - self._tp_pct / 100)
 
-    def _calc_sl(self, direction: str, entry: float) -> float:
+    def _calc_sl(self, direction: str, entry: float, symbol: str = '') -> float:
+        """SL = max(min_sl_pct, ATR×2.5). ATR = volatility_tracker.get_volatility()."""
+        min_sl_pct = self._sl_pct  # из конфига (1.0% по умолчанию, рекомендуем 1.2%)
+        atr_mult = 2.5
+
+        if symbol and self._volatility:
+            vol_pct = self._volatility.get_volatility(symbol)
+            if isinstance(vol_pct, (int, float)) and vol_pct > 0:
+                atr_sl_pct = vol_pct * atr_mult
+                sl_pct = max(min_sl_pct, atr_sl_pct)
+                logger.debug(
+                    "[%s] SL: min=%.2f%% atr=%.2f%% (vol=%.2f%%×%.1f) → used=%.2f%%",
+                    symbol, min_sl_pct, atr_sl_pct, vol_pct, atr_mult, sl_pct,
+                )
+            else:
+                sl_pct = min_sl_pct
+        else:
+            sl_pct = min_sl_pct
+
         if direction == 'long':
-            return entry * (1 - self._sl_pct / 100)
-        return entry * (1 + self._sl_pct / 100)
+            return entry * (1 - sl_pct / 100)
+        return entry * (1 + sl_pct / 100)
 
     async def _calc_qty(
         self, symbol: str, price: float, size_usdt: float = 0.0

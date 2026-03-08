@@ -136,6 +136,7 @@ order:
     adaptive: true
     enabled: true
     spread: 0.3
+    activation_pct: 0.4  # trailing активируется только после +0.4%
   type: limit
 
 risk:
