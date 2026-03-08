@@ -196,12 +196,36 @@ class OrderExecutor:
         
         try:
             # Определяем triggerDirection
-            # 1 = triggered when price RISES to trigger_price
-            # 2 = triggered when price FALLS to trigger_price
+            # 1 = triggered when price RISES to trigger_price (Buy SL — short позиция)
+            # 2 = triggered when price FALLS to trigger_price (Sell SL — long позиция)
             trigger_direction = 2 if side == 'Sell' else 1
             
             sent_at = time.time()
-            
+
+            # Проверяем что SL цена ещё не пересечена (race condition защита)
+            try:
+                ticker = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    partial(self._client.get_tickers, category='linear', symbol=symbol)
+                )
+                last_price = float(ticker['result']['list'][0]['lastPrice'])
+                if side == 'Sell' and trigger_price >= last_price:
+                    # SL для long — должен быть НИЖЕ текущей цены
+                    logger.warning(
+                        f"SL skip [{symbol}]: trigger={trigger_price} >= last={last_price} "
+                        f"(price moved past SL before placement)"
+                    )
+                    return ""
+                if side == 'Buy' and trigger_price <= last_price:
+                    # SL для short — должен быть ВЫШЕ текущей цены
+                    logger.warning(
+                        f"SL skip [{symbol}]: trigger={trigger_price} <= last={last_price} "
+                        f"(price moved past SL before placement)"
+                    )
+                    return ""
+            except Exception as e:
+                logger.debug(f"SL pre-check failed: {e}")
+
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 partial(
@@ -464,3 +488,74 @@ class OrderExecutor:
             ),
             'slippage_entries': len(self._slippage_log),
       }
+
+    async def get_balance(self) -> float:
+        """Получить доступный баланс USDT."""
+        try:
+            from functools import partial
+            loop = __import__('asyncio').get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                partial(
+                    self._client.get_wallet_balance,
+                    accountType='UNIFIED',
+                    coin='USDT',
+                ),
+            )
+            if result.get('retCode') == 0:
+                coins = (
+                    result['result']['list'][0].get('coin', [])
+                    if result['result']['list'] else []
+                )
+                for c in coins:
+                    if c.get('coin') == 'USDT':
+                        # availableToWithdraw может быть пустой строкой на testnet
+                        val = (
+                            c.get('availableToWithdraw')
+                            or c.get('walletBalance')
+                            or c.get('equity')
+                            or 0
+                        )
+                        return float(val) if val else 0.0
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("get_balance error: %s", e)
+        return 0.0
+
+
+    async def init_leverage(self, symbols: list[str], leverage: int = 3) -> None:
+        """Установить isolated margin + безопасное плечо для всех символов."""
+        loop = asyncio.get_running_loop()
+        for symbol in symbols:
+            # Isolated margin
+            try:
+                result = await loop.run_in_executor(
+                    None,
+                    partial(
+                        self._client.set_margin_mode,
+                        setMarginMode='ISOLATED_MARGIN',
+                    ),
+                )
+                if result.get('retCode') not in (0, 110026):
+                    logger.warning("set_margin_mode %s: %s", symbol, result.get('retMsg'))
+            except Exception as e:
+                logger.warning("init_leverage margin %s: %s", symbol, e)
+
+            # Плечо
+            try:
+                result = await loop.run_in_executor(
+                    None,
+                    partial(
+                        self._client.set_leverage,
+                        category='linear',
+                        symbol=symbol,
+                        buyLeverage=str(leverage),
+                        sellLeverage=str(leverage),
+                    ),
+                )
+                if result.get('retCode') not in (0, 110043):
+                    logger.warning("set_leverage %s: %s", symbol, result.get('retMsg'))
+                else:
+                    logger.info("Leverage %dx isolated margin OK: %s", leverage, symbol)
+            except Exception as e:
+                logger.warning("init_leverage %s: %s", symbol, e)

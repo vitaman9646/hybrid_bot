@@ -26,3 +26,29 @@ source venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 cp config/settings.example.yaml config/settings.yaml
 # Отредактировать config/settings.yaml — вписать API ключи
+
+---
+
+## Roadmap
+
+### Фаза 4 — Multi-profile оптимизация (следующий этап)
+
+**Идея:** вместо одного общего конфига — 3 профиля под разные типы монет.
+
+**Профили:**
+- `high_cap` (BTC, ETH) — узкие спреды, консервативные параметры
+- `mid_cap` (SOL, BNB, XRP) — средние пороги
+- `volatile` (DOGE, ADA, AVAX) — широкие пороги, больший TP/SL
+
+**План реализации:**
+1. Дождаться накопления реальных данных на mainnet (2-4 недели)
+2. Оптимизировать каждый символ отдельно
+3. Кластеризовать по результатам (не по интуиции)
+4. Добавить `profiles:` секцию в `hybrid.yaml`
+5. Engine читает профиль символа при открытии позиции
+
+**Фаза 5 — Auto-adaptive параметры**
+- `min_spread_size` масштабируется на текущий ATR символа
+- `VolatilityTracker` уже есть — использовать его данные
+- Бот сам подстраивает пороги под рыночный режим (trending/ranging/volatile)
+

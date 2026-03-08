@@ -207,19 +207,19 @@ class LocalOrderBook:
         Возвращает (price, accumulated_volume) или None.
         Для Depth Shot алгоритма.
         """
-        base = self.best_bid if side == 'bid' else self.best_ask
+        # Расстояние считаем от mid_price (или best_ask для bid, best_bid для ask)
+        if side == 'bid':
+            base = self.best_ask if self.best_ask else self.best_bid
+            sorted_prices = sorted(self._bids.keys(), reverse=True)
+        else:
+            base = self.best_bid if self.best_bid else self.best_ask
+            sorted_prices = sorted(self._asks.keys())
+
         if base is None or base == 0:
             return None
-        
-        if side == 'bid':
-            sorted_prices = sorted(
-                self._bids.keys(), reverse=True
-            )
-        else:
-            sorted_prices = sorted(self._asks.keys())
-        
+
         accumulated = 0.0
-        
+
         for price in sorted_prices:
             distance_pct_actual = (
                 abs(price - base) / base * 100

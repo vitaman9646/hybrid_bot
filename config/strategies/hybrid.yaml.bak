@@ -4,7 +4,7 @@ aggregator:
   mode: weighted
   scenario4_vol_max: 3.0
   scenario4_vol_min: 0.1
-  signal_cooldown: 60.0
+  signal_cooldown: 10.0
   use_imbalance_filter: false
   weight_averages: 0.3
   weight_depth: 0.2
@@ -28,7 +28,7 @@ analyzers:
     chaos_threshold: 5.0
     dead_threshold: 0.001
     frame_size: 0.2
-    min_quote_volume: 50
+    min_quote_volume: 100
     min_spread_size: 0.003
     min_trades_per_frame: 1
     time_frame: 0.6
@@ -39,15 +39,6 @@ dynamic_weights:
   store_in: memory
   update_interval: 14400
 filters:
-  max_mark_deviation_pct: 0.3
-  max_spread_pct: 0.3
-  correlation_filter_enabled: true
-  correlation_penalty: 0.6
-  correlation_window_sec: 60
-  correlated_pairs:
-    - [BTCUSDT, ETHUSDT]
-    - [SOLUSDT, AVAXUSDT, ADAUSDT]
-    - [BNBUSDT, XRPUSDT]
   delta:
   - range:
     - 0.3
@@ -80,7 +71,7 @@ filters:
     max: 999999999999
     min: 5000000
 min_partial_sources: 2
-min_score: 0.5
+min_score: 0.55
 mode: weighted
 name: Hybrid Trend Impulse v1
 order:
@@ -95,10 +86,10 @@ order:
     distance: 0.2
     enabled: true
     trigger: 0.5
-  size_usdt: 10.0
+  size_usdt: 50
   stop_loss:
     delay: 0
-    percent: 1.0
+    percent: 1.5
     spread: 0.1
     type: market
   take_profit:
@@ -107,34 +98,22 @@ order:
       step: 0.1
       threshold: 0.2
       timer: 30
-    percent: 2.0
+    percent: 0.8
     type: classic
   trailing:
     adaptive: true
     enabled: true
     spread: 0.3
   type: limit
-risk:
-  corr_block_enabled: true
-  daily_loss_limit_usdt: 20.0
-  drawdown_tiers:
-  - - 0.0
-    - 1.0
-  - - -1.0
-    - 0.5
-  - - -2.0
-    - 0.25
-  - - -3.0
-    - 0.0
-  max_size_usdt: 50.0
-  min_size_usdt: 5.0
-  position_pct: 10.0
-  max_trades_per_day: 50
-  max_concurrent_positions: 4
 
-circuit_breaker:
-  max_consecutive_losses: 3
-  max_losses_per_hour: 5
-  max_drawdown_pct: 5.0
-  soft_cooldown_sec: 900   # 15 мин
-  hard_cooldown_sec: 1800  # 30 мин
+risk:
+  position_pct: 2.0              # % от баланса на позицию
+  daily_loss_limit_usdt: 50.0    # стоп на день
+  corr_block_enabled: true       # блок коррелирующих символов
+  min_size_usdt: 5.0
+  max_size_usdt: 500.0
+  drawdown_tiers:                # снижение размера при просадке
+    - [0.0,  1.00]
+    - [-1.0, 0.50]
+    - [-2.0, 0.25]
+    - [-3.0, 0.00]

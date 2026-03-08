@@ -16,6 +16,18 @@ from execution.order_executor import OrderExecutor
 from storage.trade_logger import TradeLogger
 from monitoring.telegram_alerts import TelegramAlerts
 from models.signals import TradeData, LatencyLevel
+from analyzers.vector_analyzer import VectorAnalyzer
+from analyzers.averages_analyzer import AveragesAnalyzer
+from analyzers.depth_shot_analyzer import DepthShotAnalyzer
+from analyzers.signal_aggregator import SignalAggregator
+from core.filter_pipeline import FilterPipeline
+from monitoring.telegram_commands import TelegramCommands
+from monitoring.health_server import HealthServer
+from backtester.market_saver import MarketSaver
+from core.position_manager import PositionManager
+from core.risk_manager import RiskManager, RiskConfig
+from core.circuit_breaker import CircuitBreaker, CBState
+from core.data_health import DataHealthMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +59,7 @@ class HybridEngine:
 
         # Состояние
         self._running = False
-        self._shutdown_event = asyncio.Event()
+        self._shutdown_event: asyncio.Event | None = None
 
     def _init_components(self):
         """Инициализация всех компонентов"""
@@ -78,6 +90,25 @@ class HybridEngine:
         # 5. Trade Logger
         self.trade_logger = TradeLogger()
 
+        # 5b. Market Saver (запись тиков для Backtester)
+        self.market_saver = MarketSaver(
+            db_path=self.config.get('storage', {}).get('market_db', 'data/market.db')
+        )
+
+        # DataHealthMonitor
+        symbols = self.config.get('pairs', {}).get('symbols', [])
+        self.data_health = DataHealthMonitor(symbols)
+
+        # CircuitBreaker
+        cb_config = self.strategy.get('circuit_breaker', {})
+        self.circuit_breaker = CircuitBreaker(
+            max_consecutive_losses=cb_config.get('max_consecutive_losses', 3),
+            max_losses_per_hour=cb_config.get('max_losses_per_hour', 5),
+            max_drawdown_pct=cb_config.get('max_drawdown_pct', 5.0),
+            soft_cooldown_sec=cb_config.get('soft_cooldown_sec', 900),
+            hard_cooldown_sec=cb_config.get('hard_cooldown_sec', 1800),
+        )
+
         # 6. Telegram Alerts
         self.alerts = TelegramAlerts(
             monitoring_config.get('telegram', {})
@@ -95,17 +126,75 @@ class HybridEngine:
             volatility_tracker=self.volatility_tracker,
         )
 
+        # 8. Анализаторы (Фаза 2)
+        strategy_config = self.strategy.get('analyzers', {})
+
+        self.vector = VectorAnalyzer(
+            strategy_config.get('vector', {})
+        )
+        self.averages = AveragesAnalyzer(
+            strategy_config.get('averages', {})
+        )
+        self.depth = DepthShotAnalyzer(
+            strategy_config.get('depth_shot', {}),
+            self.orderbook_manager,
+        )
+        self.aggregator = SignalAggregator(
+            self.strategy.get('aggregator', {}),
+            self.vector,
+            self.averages,
+            self.depth,
+        )
+        self.aggregator.on_signal(self._on_aggregated_signal)
+
+        # 9. Filter Pipeline (Фаза 3)
+        self.filter_pipeline = FilterPipeline(
+            self.strategy,
+            http_client=self.executor._client,
+            orderbook_manager=self.orderbook_manager,
+        )
+
         # Регистрируем callbacks
         self.data_feed.on_trade(self._on_trade)
         self.data_feed.on_orderbook_update(
             self._on_orderbook_update
         )
 
+        # 10. Position Manager (Фаза 3)
+        self.position_manager = PositionManager(
+            config=self.strategy,
+            executor=self.executor,
+            volatility_tracker=self.volatility_tracker,
+        )
+
+        # 11. Risk Manager
+        risk_cfg = self.strategy.get('risk', {})
+        self.risk_manager = RiskManager(RiskConfig(
+            position_pct=risk_cfg.get('position_pct', 2.0),
+            daily_loss_limit_usdt=risk_cfg.get('daily_loss_limit_usdt', 50.0),
+            corr_block_enabled=risk_cfg.get('corr_block_enabled', True),
+            min_size_usdt=risk_cfg.get('min_size_usdt', 5.0),
+            max_size_usdt=risk_cfg.get('max_size_usdt', 500.0),
+        ))
+        self.position_manager._risk_manager = self.risk_manager
+        self.position_manager._circuit_breaker = self.circuit_breaker
+        self.position_manager._alerts = self.alerts
+        self.data_health._alerts = self.alerts
+
+        # 12. Telegram Commands
+        self.telegram_commands = TelegramCommands(
+            monitoring_config.get('telegram', {}),
+            engine=self,
+        )
+
+        self._loop: asyncio.AbstractEventLoop | None = None
         logger.info("All components initialized")
 
     async def run(self):
         """Запуск бота"""
         self._running = True
+        self._loop = asyncio.get_running_loop()
+        self._shutdown_event = asyncio.Event()
 
         logger.info("=" * 60)
         logger.info("  HYBRID TRADING BOT — Phase 1")
@@ -140,6 +229,23 @@ class HybridEngine:
             f"{self.config.get('pairs', {}).get('symbols', [])}"
         )
 
+        # Получаем начальный баланс ДО старта data_feed
+        for attempt in range(3):
+            try:
+                balance = await self.executor.get_balance()
+                if balance > 0:
+                    self.risk_manager.set_balance(balance)
+                    logger.info("Initial balance: %.2f USDT", balance)
+                    break
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.warning("Initial balance fetch attempt %d failed: %s", attempt + 1, e)
+                await asyncio.sleep(2)
+
+        # Устанавливаем isolated margin + безопасное плечо
+        symbols = self.config.get('pairs', {}).get('symbols', [])
+        await self.executor.init_leverage(symbols, leverage=3)
+
         # Запускаем задачи
         tasks = [
             asyncio.create_task(
@@ -149,6 +255,15 @@ class HybridEngine:
                 self._stats_reporter(), name="stats_reporter"
             ),
             asyncio.create_task(
+                self._position_sync_loop(), name="position_sync"
+            ),
+            asyncio.create_task(
+                self.telegram_commands.start(), name="telegram_commands"
+            ),
+            asyncio.create_task(
+                self.data_health.run(), name="data_health"
+            ),
+            asyncio.create_task(
                 self._shutdown_waiter(), name="shutdown_waiter"
             ),
         ]
@@ -156,7 +271,7 @@ class HybridEngine:
         try:
             done, pending = await asyncio.wait(
                 tasks,
-                return_when=asyncio.FIRST_COMPLETED,
+                return_when=asyncio.FIRST_EXCEPTION,
             )
 
             # Если какая-то задача завершилась — отменяем остальные
@@ -182,31 +297,144 @@ class HybridEngine:
     def _on_trade(self, trade: TradeData):
         """
         Callback для каждого трейда.
-        Фаза 1: логирование и мониторинг.
-        Фаза 2: здесь будут вызываться анализаторы.
+        Обновляем все анализаторы и оцениваем сигналы.
         """
-        # TODO Phase 2:
-        # signals = []
-        # for analyzer in self.analyzers.values():
-        #     signal = analyzer.on_trade(trade)
-        #     if signal:
-        #         signals.append(signal)
-        #
-        # if signals:
-        #     final = self.aggregator.evaluate(signals)
-        #     if final and self._pass_filters(final):
-        #         asyncio.create_task(
-        #             self.position_manager.open_position(final)
-        #         )
-        pass
+        # DataHealthMonitor: фиксируем входящий тик
+        self.data_health.on_trade(trade.symbol)
+
+        # MarketSaver: пишем тик в SQLite для Backtester
+        self.market_saver.save_trade(trade)
+
+        # Обновляем Averages (всегда)
+        self.averages.on_trade(trade)
+
+        # Обновляем Vector — он возвращает сигнал если условия выполнены
+        vector_signal = self.vector.on_trade(trade)
+
+        # FilterPipeline: накапливаем delta и volume
+        self.filter_pipeline.add_trade(
+            symbol=trade.symbol,
+            price=trade.price,
+            qty=trade.qty,
+            side=trade.side,
+            ts=trade.timestamp,
+        )
+
+        # Передаём в агрегатор
+        signal = self.aggregator.evaluate(
+            symbol=trade.symbol,
+            vector_signal=vector_signal,
+            current_price=trade.price,
+        )
+
+        # PositionManager: обновляем trailing stop
+        # Используем run_coroutine_threadsafe т.к. callback из pybit-треда
+        if self.position_manager.has_position(trade.symbol) and self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self.position_manager.update_price(trade.symbol, trade.price),
+                self._loop,
+            )
 
     def _on_orderbook_update(self, message: dict):
         """
         Callback для обновлений стакана.
         OrderBookManager уже обновлён в DataFeed.
+        DepthShot читает стакан напрямую через OrderBookManager.
         """
-        # TODO Phase 2: DepthShot analyzer
-        pass
+        pass  # DepthShot работает через orderbook_manager напрямую
+
+    def _on_aggregated_signal(self, signal):
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self._filter_and_handle_signal(signal), self._loop
+            )
+
+    async def _filter_and_handle_signal(self, signal):
+        """Обработка финального сигнала от агрегатора"""
+        # FilterPipeline: проверяем сигнал
+        result = await self.filter_pipeline.check(signal)
+        if not result.passed:
+            logger.info(
+                f"SIGNAL FILTERED [{signal.symbol}]: {result.reason}"
+            )
+            return
+
+        logger.info(
+            f"AGGREGATED SIGNAL: [{signal.scenario.value}] "
+            f"{signal.symbol} {signal.direction.value} "
+            f"entry={signal.entry_price:.2f} "
+            f"tp={signal.tp_price:.2f} "
+            f"confidence={signal.confidence:.2f}"
+        )
+        asyncio.create_task(
+            self.alerts.send(
+                f"?? <b>Signal [{signal.scenario.value}]</b>\n"
+                f"Symbol: {signal.symbol}\n"
+                f"Direction: {signal.direction.value.upper()}\n"
+                f"Entry: {signal.entry_price:.2f}\n"
+                f"TP: {signal.tp_price:.2f}\n"
+                f"Confidence: {signal.confidence:.2f}\n"
+                f"Score: {signal.score:.2f}"
+            )
+        )
+
+        # Проверяем паузу
+        if self.telegram_commands.is_paused:
+            logger.info('Trading paused, skipping signal %s', signal.symbol)
+            return
+
+        # CircuitBreaker: проверяем состояние
+        can_trade, cb_state, cb_reason = self.circuit_breaker.check()
+        if not can_trade:
+            logger.warning('CIRCUIT BREAKER [%s]: %s', signal.symbol, cb_reason)
+            return
+
+        # RiskManager: проверяем лимиты и получаем размер позиции
+        decision = self.risk_manager.check(signal.symbol)
+        if not decision.allowed:
+            logger.info(
+                f"RISK BLOCK [{signal.symbol}]: {decision.reason}"
+            )
+            return
+        signal.size_usdt = decision.size_usdt
+
+        pos = await self.position_manager.open_position(signal)
+        if pos:
+            self.risk_manager.record_open(signal.symbol)
+
+    async def _position_sync_loop(self):
+        """Периодическая синхронизация позиций с биржей."""
+        import time as _time
+        last_cleanup = _time.time()
+        while self._running:
+            await asyncio.sleep(30)
+            await self.position_manager.sync_with_exchange()
+            # Обновляем баланс для RiskManager
+            try:
+                balance = await self.executor.get_balance()
+                if balance > 0:
+                    self.risk_manager.set_balance(balance)
+                    logger.debug("RiskManager balance updated: %.2f USDT", balance)
+            except Exception as e:
+                logger.warning("Balance update error: %s", e)
+            # Ежедневная очистка старых тиков
+            if _time.time() - last_cleanup > 86400:
+                try:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(
+                        None, lambda: self.market_saver.cleanup_old_data(30)
+                    )
+                    last_cleanup = _time.time()
+                except Exception as e:
+                    logger.warning("MarketSaver cleanup error: %s", e)
+            # Обновляем баланс для RiskManager
+            try:
+                balance = await self.executor.get_balance()
+                if balance > 0:
+                    self.risk_manager.set_balance(balance)
+                    logger.debug("RiskManager balance updated: %.2f USDT", balance)
+            except Exception as e:
+                logger.warning("Balance update error: %s", e)
 
     def _on_latency_change(
         self,
@@ -234,26 +462,84 @@ class HybridEngine:
             # TODO Phase 3: self.position_manager.emergency_close_all()
 
     async def _stats_reporter(self):
-        """Периодический отчёт о состоянии"""
+        """Периодический отчёт о состоянии + алерты на аномалии"""
+        import time as _time
+        import datetime
+        last_signal_ts = _time.time()
+        no_signal_alerted = False
+        NO_SIGNAL_TIMEOUT = 600
+        CHECK_INTERVAL = 60
+
         while self._running:
-            await asyncio.sleep(60)
+            await asyncio.sleep(CHECK_INTERVAL)
 
             stats = self._collect_stats()
-
-            # Безопасное извлечение данных
             df = stats.get('data_feed', {})
             lat = stats.get('latency', {})
             exe = stats.get('executor', {})
             rl = exe.get('rate_limiter', {})
 
             logger.info(
-                f"=== STATUS === "
-                f"Trades: {df.get('trade_count', 0)} | "
-                f"OB updates: {df.get('orderbook_updates', 0)} | "
-                f"Latency: {lat.get('ws_latency_ms', 0)}ms "
-                f"({lat.get('current_level', 'unknown')}) | "
-                f"API remaining: {rl.get('remaining', 0)}"
+                "=== STATUS === "
+                "Trades: %s | OB updates: %s | Latency: %sms (%s) | API remaining: %s",
+                df.get('trade_count', 0),
+                df.get('orderbook_updates', 0),
+                lat.get('ws_latency_ms', 0),
+                lat.get('current_level', 'unknown'),
+                rl.get('remaining', 0),
             )
+
+            pm_stats = self.position_manager.get_stats()
+            rm = self.risk_manager
+
+            # Сигнал был — сбрасываем таймер
+            if pm_stats.get('total_opened', 0) > 0:
+                last_signal_ts = _time.time()
+                no_signal_alerted = False
+
+            # Алерт: нет сигналов N минут
+            elapsed = _time.time() - last_signal_ts
+            if elapsed > NO_SIGNAL_TIMEOUT and not no_signal_alerted:
+                no_signal_alerted = True
+                msg = "No signals for %.0f min. Check market conditions." % (elapsed / 60)
+                asyncio.create_task(self.alerts.send(msg))
+
+            # Алерт: большой drawdown
+            if rm._balance_usdt > 0:
+                drawdown_pct = abs(rm.session_pnl / rm._balance_usdt * 100)
+                if drawdown_pct >= 2.0 and rm.session_pnl < 0:
+                    msg = (
+                        "Drawdown Alert\n"
+                        "Session P&L: %.2f USDT\n"
+                        "Drawdown: %.1f%%\n"
+                        "Daily loss: %.2f / %.2f USDT"
+                    ) % (rm.session_pnl, drawdown_pct,
+                         rm.daily_loss_usdt, rm.cfg.daily_loss_limit_usdt)
+                    asyncio.create_task(self.alerts.send(msg, urgent=True))
+
+            # Алерт: trading halted
+            if rm.is_trading_halted:
+                msg = "Trading HALTED\nDaily loss limit reached.\nSession P&L: %.2f USDT" % rm.session_pnl
+                asyncio.create_task(self.alerts.send(msg, urgent=True))
+
+            # Ежечасный статус
+            if datetime.datetime.now().minute < 1:
+                msg = (
+                    "Hourly Status\n"
+                    "Balance: %.2f USDT\n"
+                    "Session P&L: %.2f USDT\n"
+                    "Open positions: %d\n"
+                    "Trades: %d closed (%d TP / %d SL)\n"
+                    "API remaining: %s"
+                ) % (
+                    rm._balance_usdt, rm.session_pnl,
+                    len(self.position_manager.get_all_positions()),
+                    pm_stats.get('total_closed', 0),
+                    pm_stats.get('tp_hits', 0),
+                    pm_stats.get('sl_hits', 0),
+                    rl.get('remaining', 0),
+                )
+                asyncio.create_task(self.alerts.send(msg))
 
     def _collect_stats(self) -> dict:
         """Собрать статистику со всех компонентов"""
@@ -271,6 +557,9 @@ class HybridEngine:
             },
             'executor': self.executor.get_stats(),
             'trade_logger': self.trade_logger.get_stats(),
+            'vector': self.vector.get_stats(),
+            'averages': self.averages.get_stats(),
+            'aggregator': self.aggregator.get_stats(),
         }
 
     def _handle_shutdown(self):
@@ -288,6 +577,12 @@ class HybridEngine:
         logger.info("Cleaning up...")
 
         self._running = False
+
+        # Сбрасываем буфер MarketSaver
+        try:
+            self.market_saver.flush()
+        except Exception:
+            pass
 
         # Останавливаем data feed
         await self.data_feed.stop()

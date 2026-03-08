@@ -1,0 +1,172 @@
+"""
+backtester/optimizer.py — grid search по параметрам стратегии
+
+Использование:
+    optimizer = ParameterOptimizer(base_config, db_path="data/market.db")
+    results = optimizer.run(
+        symbol="BTCUSDT",
+        ts_from=..., ts_to=...,
+        param_grid={
+            'analyzers.vector.min_spread_size': [0.003, 0.005, 0.01],
+            'analyzers.vector.min_quote_volume': [100, 500, 1000],
+            'order.take_profit.percent': [0.5, 0.8, 1.2],
+            'order.stop_loss.percent': [1.0, 1.5, 2.0],
+        },
+        metric='sharpe',   # sharpe / win_rate / total_pnl / profit_factor
+    )
+    best = results[0]
+"""
+
+from __future__ import annotations
+
+import copy
+import itertools
+import logging
+from dataclasses import dataclass, field
+from typing import Any
+
+from backtester.replay_engine import ReplayEngine, BacktestResult
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class OptimizationResult:
+    params: dict
+    result: BacktestResult
+    metric_value: float
+
+    def __repr__(self) -> str:
+        return (
+            f"OptResult(metric={self.metric_value:.4f} "
+            f"trades={self.result.total_trades} "
+            f"win_rate={self.result.win_rate:.1%} "
+            f"pnl={self.result.total_pnl:+.2f} "
+            f"params={self.params})"
+        )
+
+
+class ParameterOptimizer:
+    """
+    Grid search по параметрам стратегии.
+    Использует ReplayEngine для каждой комбинации параметров.
+    """
+
+    def __init__(self, base_config: dict, db_path: str = "data/market.db"):
+        self._base_config = base_config
+        self._db_path = db_path
+
+    def run(
+        self,
+        symbol: str,
+        ts_from: float,
+        ts_to: float,
+        param_grid: dict[str, list],
+        metric: str = 'sharpe',
+        min_trades: int = 10,
+    ) -> list[OptimizationResult]:
+        """
+        Перебирает все комбинации param_grid.
+        Возвращает результаты отсортированные по metric (лучший первый).
+
+        param_grid ключи — dot-notation пути в конфиге:
+            'analyzers.vector.min_spread_size' → config['analyzers']['vector']['min_spread_size']
+        """
+        keys = list(param_grid.keys())
+        values = list(param_grid.values())
+        combinations = list(itertools.product(*values))
+
+        logger.info(
+            "ParameterOptimizer: symbol=%s combinations=%d metric=%s",
+            symbol, len(combinations), metric,
+        )
+
+        results: list[OptimizationResult] = []
+
+        for i, combo in enumerate(combinations):
+            params = dict(zip(keys, combo))
+            cfg = self._apply_params(self._base_config, params)
+
+            engine = ReplayEngine(cfg, self._db_path)
+            bt_result = engine.run(symbol, ts_from, ts_to)
+
+            if bt_result.total_trades < min_trades:
+                logger.debug(
+                    "Combo %d/%d skipped: only %d trades (min=%d)",
+                    i + 1, len(combinations), bt_result.total_trades, min_trades,
+                )
+                continue
+
+            metric_val = self._get_metric(bt_result, metric)
+            results.append(OptimizationResult(
+                params=params,
+                result=bt_result,
+                metric_value=metric_val,
+            ))
+
+            logger.info(
+                "Combo %d/%d: %s → %s=%.4f trades=%d",
+                i + 1, len(combinations),
+                params, metric, metric_val,
+                bt_result.total_trades,
+            )
+
+        # Сортируем — лучший первый
+        results.sort(key=lambda r: r.metric_value, reverse=True)
+
+        if results:
+            logger.info("Best result: %s", results[0])
+        else:
+            logger.warning("No results with min_trades >= %d", min_trades)
+
+        return results
+
+    def top_n(
+        self,
+        results: list[OptimizationResult],
+        n: int = 5,
+    ) -> str:
+        """Форматированный вывод топ-N результатов."""
+        lines = [f"Top {min(n, len(results))} results:"]
+        for i, r in enumerate(results[:n]):
+            lines.append(
+                f"  #{i+1} metric={r.metric_value:.4f} "
+                f"trades={r.result.total_trades} "
+                f"win_rate={r.result.win_rate:.1%} "
+                f"pnl={r.result.total_pnl:+.2f} USDT "
+                f"sharpe={r.result.sharpe:.3f} | "
+                f"{r.params}"
+            )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _apply_params(base_config: dict, params: dict) -> dict:
+        """
+        Применяет dot-notation параметры к копии конфига.
+        'analyzers.vector.min_spread_size' = 0.005
+        """
+        cfg = copy.deepcopy(base_config)
+        for key, value in params.items():
+            parts = key.split('.')
+            node = cfg
+            for part in parts[:-1]:
+                if part not in node:
+                    node[part] = {}
+                node = node[part]
+            node[parts[-1]] = value
+        return cfg
+
+    @staticmethod
+    def _get_metric(result: BacktestResult, metric: str) -> float:
+        mapping = {
+            'sharpe':       result.sharpe,
+            'win_rate':     result.win_rate,
+            'total_pnl':    result.total_pnl,
+            'profit_factor': result.profit_factor,
+            'max_drawdown': -result.max_drawdown,   # меньше — лучше
+        }
+        return mapping.get(metric, result.sharpe)

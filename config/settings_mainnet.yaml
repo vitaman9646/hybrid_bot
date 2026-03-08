@@ -1,6 +1,6 @@
 exchange:
-  api_key: QhcgvVUWMQc8Iaz2EN
-  api_secret: iiv1TP6TECXr6GZ71XsfsI14V3YKyvSXZQdm
+  api_key: ВСТАВИТЬ_MAINNET_KEY
+  api_secret: ВСТАВИТЬ_MAINNET_SECRET
   max_retries: 3
   name: bybit
   rate_limit: 950
@@ -19,11 +19,8 @@ filter_pipeline:
   max_mark_deviation_pct: 0.5
   min_delta_usdt: 10000
   min_volume_usdt: 100000
-  time_filter_enabled: false
+  time_filter_enabled: true
   volume_filter_enabled: true
-health_check:
-  enabled: true
-  port: 8080
 latency:
   check_interval: 5
   critical_threshold_ms: 500

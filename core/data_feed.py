@@ -1,10 +1,9 @@
-# core/data_feed.py
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
-import threading
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from pybit.unified_trading import WebSocket
@@ -17,16 +16,38 @@ from models.signals import TradeData
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _WsConnection:
+    """Один WebSocket объект с его символами и состоянием."""
+    index: int
+    symbols: list[str]
+    ws: Optional[WebSocket] = None
+    connected: bool = False
+    reconnect_count: int = 0
+    last_message_time: float = field(default_factory=time.time)
+    trade_count: int = 0
+    ob_count: int = 0
+
+    def touch(self):
+        self.last_message_time = time.time()
+
+    def is_stale(self, timeout_sec: float = 60.0) -> bool:
+        return time.time() - self.last_message_time > timeout_sec
+
+
 class BybitDataFeed:
     """
     WebSocket подключение к Bybit.
-    Обрабатывает:
-    - Trades stream → Vector, VolatilityTracker
-    - OrderBook stream → Depth Shot, LocalOrderBook
-    - Kline stream → Averages (будущее)
-    - Ping/Pong → LatencyGuard
+
+    Изменения v2 (multi-connection):
+    - Символы делятся на N групп, каждая группа → отдельный WebSocket.
+    - Если один WS падает — остальные продолжают работать.
+    - _health_monitor детектирует зависший WS и переподключает только его.
+    - _ping_loop убран (pybit делает ping сам).
     """
-    
+
+    SYMBOLS_PER_CONNECTION = 4
+
     def __init__(
         self,
         config: dict,
@@ -38,321 +59,285 @@ class BybitDataFeed:
         self._latency_guard = latency_guard
         self._orderbook_manager = orderbook_manager
         self._volatility_tracker = volatility_tracker
-        
-        # Settings
+
         self._testnet = config.get('testnet', True)
-        self._channel_type = config.get(
-            'ws_channel_type', 'linear'
-        )
-        self._ping_interval = config.get(
-            'ws_ping_interval', 20
-        )
-        self._reconnect_delay = config.get(
-            'ws_reconnect_delay', 5
-        )
-        self._max_reconnect = config.get(
-            'ws_max_reconnect_attempts', 50
-        )
-        self._trace_logging = config.get(
-            'ws_trace_logging', False
-        )
-        
-        # Symbols
-        self._symbols: list[str] = config.get('symbols', [])
-        
-        # WebSocket instances
-        self._ws_public: Optional[WebSocket] = None
-        self._ws_private: Optional[WebSocket] = None
-        
-        # Callbacks from engine
+        self._channel_type = config.get('ws_channel_type', 'linear')
+        self._reconnect_delay = config.get('ws_reconnect_delay', 5)
+        self._max_reconnect = config.get('ws_max_reconnect_attempts', 50)
+        self._stale_timeout = config.get('ws_stale_timeout_sec', 60)
+        self._health_interval = config.get('ws_health_interval_sec', 30)
+
+        all_symbols: list[str] = config.get('symbols', [])
+        self._connections: list[_WsConnection] = self._make_connections(all_symbols)
+
         self._trade_callbacks: list[Callable] = []
         self._orderbook_callbacks: list[Callable] = []
-        
-        # State
+
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running = False
-        self._connected = False
-        self._reconnect_count = 0
-        
-        # Stats
-        self._trade_count = 0
-        self._orderbook_update_count = 0
         self._last_trade_time: dict[str, float] = {}
-    
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    @property
+    def _symbols(self) -> list[str]:
+        result = []
+        for conn in self._connections:
+            result.extend(conn.symbols)
+        return result
+
+    @property
+    def _trade_count(self) -> int:
+        return sum(c.trade_count for c in self._connections)
+
+    @property
+    def _orderbook_update_count(self) -> int:
+        return sum(c.ob_count for c in self._connections)
+
+    @property
+    def _connected(self) -> bool:
+        return any(c.connected for c in self._connections)
+
+    @property
+    def _reconnect_count(self) -> int:
+        return sum(c.reconnect_count for c in self._connections)
+
     def on_trade(self, callback: Callable):
-        """Регистрация callback для трейдов"""
         self._trade_callbacks.append(callback)
-    
+
     def on_orderbook_update(self, callback: Callable):
-        """Регистрация callback для обновлений стакана"""
         self._orderbook_callbacks.append(callback)
-    
+
     async def start(self):
-        """Запуск WebSocket подключений"""
         self._running = True
-        
+        self._loop = asyncio.get_running_loop()
+
         logger.info(
             f"Starting Bybit DataFeed "
             f"({'testnet' if self._testnet else 'mainnet'}) "
-            f"for symbols: {self._symbols}"
+            f"{len(self._connections)} connections x "
+            f"up to {self.SYMBOLS_PER_CONNECTION} symbols each"
         )
-        
-        await self._connect_public()
-        
-        # Запускаем ping loop и мониторинг
-        tasks = [
-            asyncio.create_task(self._ping_loop()),
-            asyncio.create_task(self._health_monitor()),
-        ]
-        
+
+        await asyncio.gather(
+            *[self._connect(conn) for conn in self._connections]
+        )
+
         try:
-            await asyncio.gather(*tasks)
+            await asyncio.gather(
+                asyncio.create_task(self._health_monitor()),
+            )
         except asyncio.CancelledError:
             logger.info("DataFeed tasks cancelled")
-    
+
     async def stop(self):
-        """Остановка"""
         self._running = False
-        
-        if self._ws_public:
-            try:
-                self._ws_public.exit()
-            except Exception:
-                pass
-        
+        for conn in self._connections:
+            self._exit_ws(conn)
         logger.info("DataFeed stopped")
-    
-    async def _connect_public(self):
-        """Подключение к публичному WebSocket"""
-        try:
-            self._ws_public = WebSocket(
-                testnet=self._testnet,
-                channel_type=self._channel_type,
-            )
-            
-            # Подписка на trades
-            for symbol in self._symbols:
-                self._ws_public.trade_stream(
-                    symbol=symbol,
-                    callback=self._handle_trade_message,
-                )
-                logger.info(f"Subscribed to trades: {symbol}")
-            
-            # Подписка на orderbook
-            for symbol in self._symbols:
-                self._ws_public.orderbook_stream(
-                    depth=50,
-                    symbol=symbol,
-                    callback=self._handle_orderbook_message,
-                )
-                logger.info(f"Subscribed to orderbook: {symbol}")
-            
-            self._connected = True
-            self._reconnect_count = 0
-            
-            logger.info(
-                f"Public WebSocket connected, "
-                f"{len(self._symbols)} symbols"
-            )
-            
-        except Exception as e:
-            logger.error(f"WebSocket connection error: {e}")
-            self._connected = False
-            await self._handle_reconnect()
-    
-    def _handle_trade_message(self, message: dict):
-        """
-        Обработка trade сообщений от Bybit.
-        Формат: {
-            "topic": "publicTrade.BTCUSDT",
-            "data": [
-                {
-                    "s": "BTCUSDT",
-                    "p": "60000.50",
-                    "v": "0.001",
-                    "S": "Buy",
-                    "T": 1234567890123,
-                    "i": "trade_id"
-                }
-            ]
-        }
-        """
-        try:
-            data_list = message.get('data', [])
-            
-            for data in data_list:
-                symbol = data.get('s', '')
-                price = float(data.get('p', 0))
-                qty = float(data.get('v', 0))
-                side = data.get('S', '')
-                timestamp_ms = int(data.get('T', 0))
-                trade_id = data.get('i', '')
-                
-                if not symbol or price == 0:
-                    continue
-                
-                timestamp = timestamp_ms / 1000.0
-                quote_volume = price * qty
-                
-                # Создаём TradeData
-                trade = TradeData(
-                    symbol=symbol,
-                    price=price,
-                    qty=qty,
-                    quote_volume=quote_volume,
-                    side=side,
-                    timestamp=timestamp,
-                    trade_id=trade_id,
-                )
-                
-                # Обновляем VolatilityTracker
-                self._volatility_tracker.update(
-                    symbol, price, timestamp, quote_volume
-                )
-                
-                # Вызываем callbacks
-                for callback in self._trade_callbacks:
-                    try:
-                        callback(trade)
-                    except Exception as e:
-                        logger.error(
-                            f"Trade callback error: {e}"
-                        )
-                
-                self._trade_count += 1
-                self._last_trade_time[symbol] = time.time()
-                
-        except Exception as e:
-            logger.error(f"Trade message processing error: {e}")
-    
-    def _handle_orderbook_message(self, message: dict):
-        """Обработка orderbook сообщений"""
-        try:
-            # Обновляем локальный стакан
-            self._orderbook_manager.process_message(message)
-            
-            # Вызываем callbacks
-            for callback in self._orderbook_callbacks:
-                try:
-                    callback(message)
-                except Exception as e:
-                    logger.error(
-                        f"OrderBook callback error: {e}"
-                    )
-            
-            self._orderbook_update_count += 1
-            
-        except Exception as e:
-            logger.error(
-                f"OrderBook message processing error: {e}"
-            )
-    
-    async def _ping_loop(self):
-        """Периодический ping для отслеживания latency"""
-        while self._running:
-            try:
-                if self._ws_public and self._connected:
-                    self._latency_guard.record_ping_sent()
-                    
-                    # pybit отправляет ping автоматически,
-                    # но мы можем принудительно
-                    if hasattr(self._ws_public, 'ping'):
-                        self._ws_public.ping()
-                    
-                    # Симулируем pong через небольшой delay
-                    # (pybit обрабатывает pong внутри)
-                    await asyncio.sleep(0.1)
-                    self._latency_guard.record_pong_received()
-                
-                # Проверяем timeout
-                self._latency_guard.check_no_pong_timeout(
-                    timeout_seconds=self._ping_interval * 2
-                )
-                
-            except Exception as e:
-                logger.error(f"Ping error: {e}")
-            
-            await asyncio.sleep(self._ping_interval)
-    
-    async def _health_monitor(self):
-        """Мониторинг здоровья подключения"""
-        while self._running:
-            await asyncio.sleep(30)
-            
-            # Проверяем что данные приходят
-            now = time.time()
-            for symbol in self._symbols:
-                last = self._last_trade_time.get(symbol, 0)
-                if last > 0 and now - last > 60:
-                    logger.warning(
-                        f"No trades for {symbol} in "
-                        f"{now - last:.0f}s"
-                    )
-            
-            # Логируем статистику
-            logger.info(
-                f"DataFeed health: "
-                f"trades={self._trade_count} "
-                f"ob_updates={self._orderbook_update_count} "
-                f"latency={self._latency_guard.current_latency_ms:.0f}ms "
-                f"level={self._latency_guard.current_level.value}"
-            )
-    
-    async def _handle_reconnect(self):
-        """Обработка реконнекта"""
-        if self._reconnect_count >= self._max_reconnect:
-            logger.critical(
-                f"Max reconnect attempts reached "
-                f"({self._max_reconnect})"
-            )
-            self._running = False
-            return
-        
-        self._reconnect_count += 1
-        delay = min(
-            self._reconnect_delay * self._reconnect_count,
-            60,  # макс 60 секунд
-        )
-        
-        logger.warning(
-            f"Reconnecting in {delay}s "
-            f"(attempt {self._reconnect_count}/"
-            f"{self._max_reconnect})"
-        )
-        
-        await asyncio.sleep(delay)
-        await self._connect_public()
-    
+
     def add_symbol(self, symbol: str):
-        """Динамическое добавление символа"""
         if symbol in self._symbols:
             return
-        
-        self._symbols.append(symbol)
-        
-        if self._ws_public and self._connected:
-            self._ws_public.trade_stream(
-                symbol=symbol,
-                callback=self._handle_trade_message,
-            )
-            self._ws_public.orderbook_stream(
-                depth=50,
-                symbol=symbol,
-                callback=self._handle_orderbook_message,
-            )
-            logger.info(f"Dynamically added symbol: {symbol}")
-    
+        target = min(self._connections, key=lambda c: len(c.symbols))
+        target.symbols.append(symbol)
+        if target.ws and target.connected:
+            target.ws.trade_stream(symbol=symbol, callback=self._make_trade_cb(target))
+            target.ws.orderbook_stream(depth=50, symbol=symbol, callback=self._make_ob_cb(target))
+            logger.info(f"Dynamically added {symbol} -> connection #{target.index}")
+
     def remove_symbol(self, symbol: str):
-        """Удалить символ"""
-        if symbol in self._symbols:
-            self._symbols.remove(symbol)
-            logger.info(f"Removed symbol: {symbol}")
-    
+        for conn in self._connections:
+            if symbol in conn.symbols:
+                conn.symbols.remove(symbol)
+                logger.info(f"Removed symbol: {symbol}")
+                return
+
     def get_stats(self) -> dict:
         return {
             'connected': self._connected,
-            'symbols': self._symbols,
-            'trade_count': self._trade_count,
-            'orderbook_updates': self._orderbook_update_count,
-            'reconnect_count': self._reconnect_count,
+            'connections': [
+                {
+                    'index': c.index,
+                    'symbols': c.symbols,
+                    'connected': c.connected,
+                    'reconnects': c.reconnect_count,
+                    'trades': c.trade_count,
+                    'ob_updates': c.ob_count,
+                    'stale': c.is_stale(self._stale_timeout),
+                }
+                for c in self._connections
+            ],
+            'total_trades': self._trade_count,
+            'total_ob_updates': self._orderbook_update_count,
+            'total_reconnects': self._reconnect_count,
             'latency': self._latency_guard.get_stats(),
-          }
+        }
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle
+    # ------------------------------------------------------------------
+
+    def _make_connections(self, symbols: list[str]) -> list[_WsConnection]:
+        n = self.SYMBOLS_PER_CONNECTION
+        groups = [symbols[i:i + n] for i in range(0, len(symbols), n)]
+        return [_WsConnection(index=i, symbols=grp) for i, grp in enumerate(groups)]
+
+    async def _connect(self, conn: _WsConnection):
+        try:
+            conn.ws = WebSocket(
+                testnet=self._testnet,
+                channel_type=self._channel_type,
+            )
+
+            trade_cb = self._make_trade_cb(conn)
+            ob_cb = self._make_ob_cb(conn)
+
+            for symbol in conn.symbols:
+                conn.ws.trade_stream(symbol=symbol, callback=trade_cb)
+                conn.ws.orderbook_stream(depth=50, symbol=symbol, callback=ob_cb)
+
+            conn.connected = True
+            conn.last_message_time = time.time()
+            logger.info(f"Connection #{conn.index} ready: {conn.symbols}")
+
+        except Exception as e:
+            conn.connected = False
+            logger.error(f"Connection #{conn.index} failed: {e}")
+
+    async def _reconnect(self, conn: _WsConnection):
+        if conn.reconnect_count >= self._max_reconnect:
+            logger.critical(
+                f"Connection #{conn.index}: max reconnects reached, "
+                f"giving up on {conn.symbols}"
+            )
+            return
+
+        conn.connected = False
+        self._exit_ws(conn)
+
+        conn.reconnect_count += 1
+        delay = min(self._reconnect_delay * conn.reconnect_count, 60)
+
+        logger.warning(
+            f"Connection #{conn.index}: reconnecting in {delay}s "
+            f"(attempt {conn.reconnect_count}/{self._max_reconnect})"
+        )
+
+        await asyncio.sleep(delay)
+        await self._connect(conn)
+
+    def _exit_ws(self, conn: _WsConnection):
+        if conn.ws:
+            try:
+                conn.ws.exit()
+            except Exception:
+                pass
+            conn.ws = None
+        conn.connected = False
+
+    # ------------------------------------------------------------------
+    # Callbacks (called from pybit threading context)
+    # ------------------------------------------------------------------
+
+    def _make_trade_cb(self, conn: _WsConnection) -> Callable:
+        def _cb(message: dict):
+            conn.touch()
+            conn.trade_count += 1
+            self._dispatch_trade(message)
+        return _cb
+
+    def _make_ob_cb(self, conn: _WsConnection) -> Callable:
+        def _cb(message: dict):
+            conn.touch()
+            conn.ob_count += 1
+            self._dispatch_orderbook(message)
+        return _cb
+
+    def _dispatch_trade(self, message: dict):
+        try:
+            data_list = message.get('data', [])
+            if not data_list:
+                return
+
+            for item in data_list:
+                symbol = item.get('s', '')
+                self._last_trade_time[symbol] = time.time()
+
+                trade = TradeData(
+                    symbol=symbol,
+                    price=float(item.get('p', 0)),
+                    qty=float(item.get("v", 0)),
+                    quote_volume=float(item.get("v", 0)) * float(item.get("p", 0)),
+                    trade_id=item.get("i", ""),
+                    side=item.get('S', 'Buy'),
+                    timestamp=float(item.get('T', time.time() * 1000)) / 1000.0,
+                )
+
+                self._volatility_tracker.update(
+                    symbol=trade.symbol,
+                    price=trade.price,
+                    timestamp=trade.timestamp,
+                    volume=trade.qty,
+                )
+
+            for callback in list(self._trade_callbacks):
+                try:
+                    callback(trade)
+                except Exception as e:
+                    logger.error(f"Trade callback error: {e}")
+
+        except Exception as e:
+            logger.error(f"Trade message processing error: {e}")
+
+    def _dispatch_orderbook(self, message: dict):
+        try:
+            self._orderbook_manager.process_message(message)
+
+            for callback in list(self._orderbook_callbacks):
+                try:
+                    callback(message)
+                except Exception as e:
+                    logger.error(f"OrderBook callback error: {e}")
+
+        except Exception as e:
+            logger.error(f"OrderBook message processing error: {e}")
+
+    # ------------------------------------------------------------------
+    # Health monitor
+    # ------------------------------------------------------------------
+
+    async def _health_monitor(self):
+        while self._running:
+            await asyncio.sleep(self._health_interval)
+
+            now = time.time()
+
+            for conn in self._connections:
+                if conn.connected and conn.is_stale(self._stale_timeout):
+                    logger.warning(
+                        f"Connection #{conn.index} stale "
+                        f"({now - conn.last_message_time:.0f}s no data), "
+                        f"reconnecting..."
+                    )
+                    asyncio.create_task(self._reconnect(conn))
+
+                for symbol in conn.symbols:
+                    last = self._last_trade_time.get(symbol, 0)
+                    if last > 0 and now - last > 60:
+                        logger.warning(
+                            f"No trades for {symbol} in {now - last:.0f}s "
+                            f"(connection #{conn.index})"
+                        )
+
+            stats_lines = " | ".join(
+                f"#{c.index}:{c.trade_count}t/{c.ob_count}ob"
+                f"{'OK' if c.connected else 'DOWN'}"
+                for c in self._connections
+            )
+            logger.info(
+                f"DataFeed health [{stats_lines}] "
+                f"latency={self._latency_guard.current_latency_ms:.0f}ms"
+            )
