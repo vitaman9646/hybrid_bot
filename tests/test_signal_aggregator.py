@@ -45,7 +45,8 @@ def make_vector_signal(symbol, direction, confidence=0.8,
 
 
 def make_aggregator(symbol="BTCUSDT", bids=None, asks=None,
-                    imbalance_filter=False, cooldown=0.0, **kwargs):
+                    imbalance_filter=False, cooldown=0.0,
+                    s2_threshold=0.50, **kwargs):
     if bids is None:
         bids = [(59700, 10.0), (59800, 0.5)]
     if asks is None:
@@ -73,7 +74,17 @@ def make_aggregator(symbol="BTCUSDT", bids=None, asks=None,
         'weight_depth': 0.2,
         'entry_threshold': 0.3,
         'use_imbalance_filter': imbalance_filter,
-        'signal_cooldown': cooldown,
+        'thresholds': {
+            'all_three':       0.30,
+            'averages_vector': s2_threshold,
+            'vector_depth':    0.30,
+            'averages_depth':  0.30,
+        },
+        'cooldown': {
+            'default':  cooldown,
+            'after_tp': cooldown,
+            'after_sl': cooldown,
+        },
     }
     config.update(kwargs)
 
@@ -148,7 +159,7 @@ class TestSignalAggregator:
         assert result is None
 
     def test_scenario2_trend_plus_impulse(self):
-        agg, vector, averages, _ = make_aggregator()
+        agg, vector, averages, _ = make_aggregator(s2_threshold=0.45)
         feed_uptrend(averages, "BTCUSDT")
         vector._market_state["BTCUSDT"] = MarketState.VOLATILE
 

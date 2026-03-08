@@ -146,6 +146,7 @@ class HybridEngine:
             self.depth,
         )
         self.aggregator.on_signal(self._on_aggregated_signal)
+        self.aggregator.on_opposite_exit(self._on_opposite_exit)
 
         # 9. Filter Pipeline (Фаза 3)
         self.filter_pipeline = FilterPipeline(
@@ -179,6 +180,7 @@ class HybridEngine:
         self.position_manager._risk_manager = self.risk_manager
         self.position_manager._circuit_breaker = self.circuit_breaker
         self.position_manager._alerts = self.alerts
+        self.position_manager._aggregator = self.aggregator
         self.data_health._alerts = self.alerts
 
         # 12. Telegram Commands
@@ -321,10 +323,12 @@ class HybridEngine:
         )
 
         # Передаём в агрегатор
+        pos_dir = self.position_manager.get_direction(trade.symbol)
         signal = self.aggregator.evaluate(
             symbol=trade.symbol,
             vector_signal=vector_signal,
             current_price=trade.price,
+            current_position_direction=pos_dir,
         )
 
         # PositionManager: обновляем trailing stop
@@ -348,6 +352,36 @@ class HybridEngine:
             asyncio.run_coroutine_threadsafe(
                 self._filter_and_handle_signal(signal), self._loop
             )
+
+    def _on_opposite_exit(self, exit_signal):
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self._handle_opposite_exit(exit_signal), self._loop
+            )
+
+    async def _handle_opposite_exit(self, exit_signal):
+        from analyzers.signal_aggregator import ExitReason
+        symbol = exit_signal.symbol
+        reason = exit_signal.reason
+
+        logger.info("OPPOSITE EXIT [%s] %s score=%.2f",
+                    reason.value.upper(), symbol, exit_signal.score)
+
+        pos = self.position_manager.get_position(symbol)
+        if pos is None:
+            return
+
+        # Закрываем текущую позицию
+        await self.position_manager.close_position(symbol, reason='opposite_exit')
+
+        # Реверс — открываем в обратную сторону
+        if reason == ExitReason.REVERSE:
+            from models.signals import Direction
+            new_dir = Direction.SHORT if pos.direction == Direction.LONG else Direction.LONG
+            logger.info("REVERSE %s → %s", symbol, new_dir.value)
+            # Даём рынку 200ms успокоиться
+            await asyncio.sleep(0.2)
+            # Сигнал реверса создаётся в следующем evaluate() цикле автоматически
 
     async def _filter_and_handle_signal(self, signal):
         """Обработка финального сигнала от агрегатора"""

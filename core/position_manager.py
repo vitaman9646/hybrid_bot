@@ -337,6 +337,11 @@ class PositionManager:
 
             del self._positions[symbol]
 
+            # Уведомляем агрегатор об исходе сделки (умный cooldown)
+            if hasattr(self, '_aggregator') and self._aggregator is not None:
+                exit_reason = reason if reason in ('tp', 'sl') else 'sl'
+                self._aggregator.notify_exit(symbol, exit_reason)
+
             # Уведомляем RiskManager если он подключён
             if self._risk_manager is not None:
                 self._risk_manager.record_close(symbol, pos.realized_pnl)
@@ -451,6 +456,11 @@ class PositionManager:
 
     def has_position(self, symbol: str) -> bool:
         return symbol in self._positions
+
+    def get_direction(self, symbol: str):
+        """Возвращает Direction открытой позиции или None."""
+        pos = self._positions.get(symbol)
+        return pos.direction if pos else None
 
     def get_stats(self) -> dict:
         return {
