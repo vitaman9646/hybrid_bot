@@ -529,6 +529,26 @@ class PositionManager:
         if profit_pct < self._trailing_activation_pct:
             return  # ещё не активирован
 
+        # v3: Breakeven SL при +1.5×ATR
+        atr_pct = 0.0
+        if self._volatility:
+            vol = self._volatility.get_volatility(pos.symbol)
+            if isinstance(vol, (int, float)) and vol > 0:
+                atr_pct = vol
+        breakeven_trigger_pct = atr_pct * 1.5 if atr_pct > 0 else self._trailing_activation_pct * 2
+        if profit_pct >= breakeven_trigger_pct and not getattr(pos, '_breakeven_set', False):
+            breakeven_price = pos.entry_price * 1.001 if pos.direction == 'long' else pos.entry_price * 0.999
+            if pos.direction == 'long' and breakeven_price > pos.trailing_stop_price:
+                pos.trailing_stop_price = breakeven_price
+                pos._breakeven_set = True
+                logger.info("[%s] Breakeven SL set at %.4f (+0.1%% from entry, profit=%.2f%%)",
+                            pos.symbol, breakeven_price, profit_pct)
+            elif pos.direction == 'short' and breakeven_price < pos.trailing_stop_price:
+                pos.trailing_stop_price = breakeven_price
+                pos._breakeven_set = True
+                logger.info("[%s] Breakeven SL set at %.4f (-0.1%% from entry, profit=%.2f%%)",
+                            pos.symbol, breakeven_price, profit_pct)
+
         spread_pct = self._get_trailing_spread(pos.symbol)
 
         if pos.direction == 'long':
