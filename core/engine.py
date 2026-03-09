@@ -436,7 +436,17 @@ class HybridEngine:
             return
 
         # RiskManager: проверяем лимиты и получаем размер позиции
-        decision = self.risk_manager.check(signal.symbol)
+        # Получаем ATR для sl_distance
+        vol_tracker = self.volatility_tracker.get(signal.symbol)
+        atr_pct = vol_tracker.get_volatility() if vol_tracker else 0.0
+        sl_dist = max(atr_pct * 2.5, self.risk_manager.cfg.sl_pct_default) if atr_pct else self.risk_manager.cfg.sl_pct_default
+
+        decision = self.risk_manager.check(
+            signal.symbol,
+            score=signal.score,
+            sl_distance_pct=sl_dist,
+            scenario_threshold=signal.threshold if hasattr(signal, 'threshold') else 0.4,
+        )
         if not decision.allowed:
             logger.info(
                 f"RISK BLOCK [{signal.symbol}]: {decision.reason}"

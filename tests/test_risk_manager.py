@@ -37,17 +37,29 @@ def make_rm_with_balance(balance: float = 1000.0, **kwargs) -> RiskManager:
 
 class TestPositionSizing:
 
-    def test_default_2pct_of_balance(self):
-        rm = make_rm_with_balance(1000.0, position_pct=2.0)
+    def test_risk_based_sizing(self):
+        # risk=0.75%, sl=1.0% → size = (1000 * 0.0075) / 0.01 = 750, capped by position_pct=10% → 100
+        rm = make_rm_with_balance(1000.0, risk_per_trade_pct=0.75, position_pct=10.0,
+                                   sl_pct_default=1.0, score_sizing_enabled=False)
         d = rm.check("BTCUSDT")
         assert d.allowed
-        assert d.size_usdt == pytest.approx(20.0)
+        assert d.size_usdt == pytest.approx(100.0)
+
+    def test_risk_based_sizing_no_cap(self):
+        # risk=0.75%, sl=5.0% → size = (1000 * 0.0075) / 0.05 = 150, under cap 10%=100? no 150>100 → 100
+        rm = make_rm_with_balance(1000.0, risk_per_trade_pct=0.75, position_pct=20.0,
+                                   sl_pct_default=5.0, score_sizing_enabled=False)
+        d = rm.check("BTCUSDT")
+        assert d.allowed
+        assert d.size_usdt == pytest.approx(150.0)  # (1000*0.0075)/0.05=150, cap=200 → 150
 
     def test_custom_pct(self):
-        rm = make_rm_with_balance(2000.0, position_pct=5.0)
+        # risk=1%, sl=1% → size=1000, capped by position_pct=5% → 50
+        rm = make_rm_with_balance(1000.0, risk_per_trade_pct=1.0, position_pct=5.0,
+                                   sl_pct_default=1.0, score_sizing_enabled=False)
         d = rm.check("ETHUSDT")
         assert d.allowed
-        assert d.size_usdt == pytest.approx(100.0)
+        assert d.size_usdt == pytest.approx(50.0)
 
     def test_max_size_cap(self):
         rm = make_rm_with_balance(10000.0, position_pct=10.0, max_size_usdt=500.0)
@@ -77,7 +89,12 @@ class TestDrawdownTiers:
     def _rm(self) -> RiskManager:
         return make_rm_with_balance(
             1000.0,
-            position_pct=10.0,   # base_size = 100
+            risk_per_trade_pct=0.75,
+            position_pct=10.0,   # cap = 100
+            sl_pct_default=1.0,  # size = (1000*0.0075)/0.01 = 750, capped → 100
+            score_sizing_enabled=False,
+            daily_loss_threshold_pct=-999.0,  # отключаем daily multiplier в этих тестах
+            daily_profit_threshold_pct=999.0,
             drawdown_tiers=[
                 (0.0,  1.00),
                 (-1.0, 0.50),
@@ -161,7 +178,7 @@ class TestDailyLossLimit:
         assert "daily_loss_limit" in d.reason
 
     def test_allows_below_limit(self):
-        rm = make_rm_with_balance(1000.0, daily_loss_limit_usdt=30.0)
+        rm = make_rm_with_balance(1000.0, daily_loss_limit_usdt=30.0, daily_loss_limit_pct=5.0)
         rm._daily_loss_usdt = 29.99
         d = rm.check("BTCUSDT")
         assert d.allowed
@@ -280,7 +297,7 @@ class TestSessionPnl:
 class TestCombinedScenarios:
 
     def test_daily_loss_blocks_even_with_no_drawdown(self):
-        rm = make_rm_with_balance(1000.0, daily_loss_limit_usdt=10.0)
+        rm = make_rm_with_balance(1000.0, daily_loss_limit_usdt=10.0, daily_loss_limit_pct=0.5)
         rm._daily_loss_usdt = 10.0
         d = rm.check("BTCUSDT")
         assert not d.allowed
@@ -294,6 +311,11 @@ class TestCombinedScenarios:
         rm = make_rm_with_balance(
             1000.0,
             position_pct=10.0,
+            risk_per_trade_pct=0.75,
+            sl_pct_default=1.0,
+            score_sizing_enabled=False,
+            daily_loss_threshold_pct=-999.0,
+            daily_profit_threshold_pct=999.0,
             drawdown_tiers=[
                 (0.0,  1.00),
                 (-1.0, 0.50),
@@ -314,15 +336,18 @@ class TestCombinedScenarios:
         assert not d.allowed
 
     def test_full_flow_open_close_reopen(self):
-        rm = make_rm_with_balance(1000.0, position_pct=2.0, daily_loss_limit_usdt=100.0)
+        rm = make_rm_with_balance(1000.0, position_pct=10.0, risk_per_trade_pct=0.75,
+                                      sl_pct_default=1.0, score_sizing_enabled=False,
+                                      daily_loss_limit_usdt=100.0, daily_loss_limit_pct=10.0,
+                                      daily_loss_threshold_pct=-999.0, daily_profit_threshold_pct=999.0)
         d = rm.check("BTCUSDT")
         assert d.allowed
-        assert d.size_usdt == pytest.approx(20.0)
+        assert d.size_usdt == pytest.approx(100.0)
         rm.record_open("BTCUSDT")
         rm.record_close("BTCUSDT", pnl_usdt=+3.0)
         d2 = rm.check("BTCUSDT")
         assert d2.allowed
-        assert d2.size_usdt == pytest.approx(20.0)
+        assert d2.size_usdt == pytest.approx(100.0)
 
     def test_status_str_contains_key_info(self):
         rm = make_rm_with_balance(500.0)
