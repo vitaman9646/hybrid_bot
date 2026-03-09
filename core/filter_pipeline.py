@@ -102,6 +102,14 @@ class FilterPipeline:
         # HTTP клиент для funding/mark (опционально)
         self._http = http_client
 
+        # v3: Stop-Hunt Detector
+        self._stop_hunt_enabled: bool = cfg.get('stop_hunt_filter_enabled', True)
+        self._stop_hunt_threshold_pct: float = cfg.get('stop_hunt_threshold_pct', 0.5)
+        self._stop_hunt_window_s: float = cfg.get('stop_hunt_window_s', 3.0)
+        self._stop_hunt_block_s: float = cfg.get('stop_hunt_block_s', 10.0)
+        self._price_history: dict = {}
+        self._stop_hunt_blocked_until: dict = {}
+
         # Stats
         self._stats = {
             'total': 0,
@@ -127,6 +135,13 @@ class FilterPipeline:
         price = signal.entry_price
 
         # === HARD BLOCK FILTERS ===
+
+        # 0. Stop-Hunt Detector
+        if self._stop_hunt_enabled:
+            self._update_price_history(symbol, price)
+            result = self._check_stop_hunt(symbol, price)
+            if not result.passed:
+                return self._block(result)
 
         # 1. Time of day
         if self._time_filter_enabled:
@@ -448,3 +463,63 @@ class FilterPipeline:
         cutoff = time.time() - window_sec
         while window and window[0][0] < cutoff:
             window.pop(0)
+
+    def _update_price_history(self, symbol: str, price: float) -> None:
+        """Сохраняем историю цен для stop-hunt детектора."""
+        now = time.time()
+        if symbol not in self._price_history:
+            self._price_history[symbol] = []
+        self._price_history[symbol].append((now, price))
+        # Чистим старые записи (старше window×3)
+        cutoff = now - self._stop_hunt_window_s * 3
+        self._price_history[symbol] = [
+            (ts, p) for ts, p in self._price_history[symbol] if ts >= cutoff
+        ]
+
+    def _check_stop_hunt(self, symbol: str, price: float) -> FilterResult:
+        """Stop-Hunt Detector: вспышка цены ≥0.5% и откат за 3s → блок 10s."""
+        now = time.time()
+
+        # Проверяем активный блок
+        if symbol in self._stop_hunt_blocked_until:
+            if now < self._stop_hunt_blocked_until[symbol]:
+                remaining = self._stop_hunt_blocked_until[symbol] - now
+                return FilterResult(
+                    passed=False,
+                    reason=f"stop_hunt_block ({remaining:.1f}s remaining)",
+                    details={'symbol': symbol},
+                )
+            else:
+                del self._stop_hunt_blocked_until[symbol]
+
+        history = self._price_history.get(symbol, [])
+        if len(history) < 2:
+            return FilterResult(passed=True)
+
+        window_start = now - self._stop_hunt_window_s
+        recent = [(ts, p) for ts, p in history if ts >= window_start]
+        if len(recent) < 2:
+            return FilterResult(passed=True)
+
+        prices = [p for _, p in recent]
+        price_max = max(prices)
+        price_min = min(prices)
+        swing_pct = (price_max - price_min) / price_min * 100
+
+        if swing_pct >= self._stop_hunt_threshold_pct:
+            # Проверяем откат: текущая цена вернулась к середине диапазона
+            mid = (price_max + price_min) / 2
+            if abs(price - mid) / mid * 100 < self._stop_hunt_threshold_pct * 0.5:
+                self._stop_hunt_blocked_until[symbol] = now + self._stop_hunt_block_s
+                logger.warning(
+                    "[%s] Stop-hunt detected: swing=%.2f%% in %.1fs → block %.1fs",
+                    symbol, swing_pct, self._stop_hunt_window_s, self._stop_hunt_block_s,
+                )
+                return FilterResult(
+                    passed=False,
+                    reason=f"stop_hunt detected (swing={swing_pct:.2f}%)",
+                    details={'swing_pct': swing_pct, 'symbol': symbol},
+                )
+
+        return FilterResult(passed=True)
+
