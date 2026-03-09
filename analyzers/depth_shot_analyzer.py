@@ -39,6 +39,48 @@ class DepthShotSignal:
     tp_type: TakeProfitType
 
 
+class WallTracker:
+    """v3: Отслеживает время жизни объёмных стен. Игнорирует стены < min_age_s."""
+
+    def __init__(self, min_age_s: float = 7.0, max_drop_pct: float = 0.3):
+        self.min_age_s = min_age_s
+        self.max_drop_pct = max_drop_pct  # стена надёжна если не уменьшилась >30%
+        self._walls: dict = {}  # (symbol, side, price_level) -> {first_seen, max_size, current_size}
+
+    def update(self, symbol: str, side: str, price_level: float, size_usdt: float) -> None:
+        key = (symbol, side, round(price_level, 2))
+        now = time.time()
+        if key in self._walls:
+            self._walls[key]['current_size'] = size_usdt
+            self._walls[key]['max_size'] = max(self._walls[key]['max_size'], size_usdt)
+        else:
+            self._walls[key] = {
+                'first_seen': now,
+                'max_size': size_usdt,
+                'current_size': size_usdt,
+            }
+
+    def is_reliable(self, symbol: str, side: str, price_level: float) -> bool:
+        key = (symbol, side, round(price_level, 2))
+        wall = self._walls.get(key)
+        if not wall:
+            return False
+        age = time.time() - wall['first_seen']
+        if age < self.min_age_s:
+            return False
+        if wall['max_size'] > 0:
+            retention = wall['current_size'] / wall['max_size']
+            if retention < (1.0 - self.max_drop_pct):
+                return False
+        return True
+
+    def cleanup(self, max_age_s: float = 300.0) -> None:
+        """Удаляем старые записи."""
+        now = time.time()
+        self._walls = {k: v for k, v in self._walls.items()
+                       if now - v['first_seen'] < max_age_s}
+
+
 class DepthShotAnalyzer:
     """
     Реализация алгоритма Depth Shot из документации MoonTrader.
@@ -91,6 +133,13 @@ class DepthShotAnalyzer:
         self._signals_generated: int = 0
         self._signals_by_symbol: dict[str, int] = {}
         self._last_scan_time: dict[str, float] = {}
+
+        # v3: WallTracker
+        wall_cfg = config.get('wall_tracker', {})
+        self._wall_tracker = WallTracker(
+            min_age_s=wall_cfg.get('min_age_s', 7.0),
+            max_drop_pct=wall_cfg.get('max_drop_pct', 0.3),
+        )
 
         # Callbacks
         self._signal_callbacks: list[Callable] = []
@@ -154,6 +203,15 @@ class DepthShotAnalyzer:
             return None
 
         level_price, level_volume = result
+
+        # v3: WallTracker — обновляем и проверяем надёжность стены
+        self._wall_tracker.update(symbol, side, level_price, level_volume)
+        if not self._wall_tracker.is_reliable(symbol, side, level_price):
+            logger.debug(
+                "[%s] Wall at %.4f not reliable yet (age < %.1fs or shrunk)",
+                symbol, level_price, self._wall_tracker.min_age_s
+            )
+            return None
         distance_pct = abs(level_price - current_price) / current_price * 100
 
         # Рассчитываем TP

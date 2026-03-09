@@ -65,6 +65,7 @@ def make_aggregator(symbol="BTCUSDT", bids=None, asks=None,
         'max_distance_pct': 5.0,
         'tp_type': 'classic',
         'tp_pct': 0.3,
+        'wall_tracker': {'min_age_s': 0.0, 'max_drop_pct': 0.99},
     }, manager)
 
     config = {

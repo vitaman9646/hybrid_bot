@@ -39,6 +39,7 @@ def make_config(**kwargs):
         stop_if_outside=True,
         tp_type='classic',
         tp_pct=0.3,
+        wall_tracker={'min_age_s': 0.0, 'max_drop_pct': 0.99},  # отключаем в тестах
     )
     base.update(kwargs)
     return base
