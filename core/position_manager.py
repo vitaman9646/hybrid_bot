@@ -48,6 +48,12 @@ class Position:
     peak_price: float = 0.0      # лучшая цена с момента открытия
     scenario: str = ""
 
+    # v3: Partial TP
+    partial_tp_enabled: bool = False
+    partial_tp_price: float = 0.0    # цена первого частичного TP
+    partial_tp_fraction: float = 0.5 # доля позиции для закрытия
+    partial_tp_done: bool = False     # уже исполнен
+
     # P&L
     realized_pnl: float = 0.0
     close_price: float = 0.0
@@ -211,6 +217,10 @@ class PositionManager:
             peak_price=entry,
             trailing_stop_price=sl,
             scenario=getattr(signal, "scenario", "").value if hasattr(getattr(signal, "scenario", ""), "value") else getattr(signal, "scenario", ""),
+            # v3: Partial TP — первый уровень на середине до TP
+            partial_tp_enabled=True,
+            partial_tp_price=(entry + tp) / 2 if direction == 'long' else (entry + tp) / 2,
+            partial_tp_fraction=0.5,
         )
 
         self._positions[symbol] = pos
@@ -267,6 +277,39 @@ class PositionManager:
         # Trailing stop
         if pos.trailing_enabled:
             await self._update_trailing(pos, price)
+
+        # v3: Partial TP
+        if pos.partial_tp_enabled and not pos.partial_tp_done and pos.partial_tp_price > 0:
+            hit = (pos.direction == 'long' and price >= pos.partial_tp_price) or                   (pos.direction == 'short' and price <= pos.partial_tp_price)
+            if hit:
+                partial_qty = round(pos.qty * pos.partial_tp_fraction, 8)
+                logger.info(
+                    "[%s] Partial TP hit at %.4f — closing %.4f (%.0f%% of position)",
+                    symbol, price, partial_qty, pos.partial_tp_fraction * 100
+                )
+                close_fn = getattr(self._executor, 'close_position', None)
+                if close_fn is None:
+                    ok = False
+                else:
+                    import asyncio
+                    if asyncio.iscoroutinefunction(close_fn):
+                        ok = await close_fn(symbol=symbol, qty=partial_qty,
+                                           side='sell' if pos.direction == 'long' else 'buy')
+                    else:
+                        ok = close_fn(symbol=symbol, qty=partial_qty,
+                                     side='sell' if pos.direction == 'long' else 'buy')
+                if ok:
+                    pos.qty -= partial_qty
+                    pos.partial_tp_done = True
+                    # Переносим SL на breakeven
+                    be_price = pos.entry_price * 1.001 if pos.direction == 'long' else pos.entry_price * 0.999
+                    if pos.direction == 'long' and be_price > pos.trailing_stop_price:
+                        pos.trailing_stop_price = be_price
+                        pos._breakeven_set = True
+                    elif pos.direction == 'short' and be_price < pos.trailing_stop_price:
+                        pos.trailing_stop_price = be_price
+                        pos._breakeven_set = True
+                    logger.info("[%s] SL moved to breakeven %.4f after partial TP", symbol, be_price)
 
         # Проверяем max drawdown (hard stop независимо от SL ордера)
         drawdown = self._calc_drawdown_pct(pos, price)
