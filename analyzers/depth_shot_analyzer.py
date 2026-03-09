@@ -61,6 +61,17 @@ class DepthShotAnalyzer:
 
         # Основные параметры из документации
         self.min_volume_usdt: float = config.get('min_volume_usdt', 500_000)
+        # v3: адаптивный порог стен по символу
+        self._symbol_thresholds: dict = config.get('symbol_thresholds', {
+            'BTCUSDT':  200_000,
+            'ETHUSDT':  100_000,
+            'SOLUSDT':   50_000,
+            'BNBUSDT':   50_000,
+            'XRPUSDT':   30_000,
+            'DOGEUSDT':  30_000,
+            'ADAUSDT':   30_000,
+            'AVAXUSDT':  30_000,
+        })
         self.min_distance_pct: float = config.get('min_distance_pct', 0.3)
         self.max_distance_pct: float = config.get('max_distance_pct', 2.5)
         self.buffer_pct: float = config.get('buffer_pct', 0.2)
@@ -90,6 +101,10 @@ class DepthShotAnalyzer:
             f"distance={self.min_distance_pct}-{self.max_distance_pct}% "
             f"tp_type={self.tp_type.value}"
         )
+
+    def _get_min_volume(self, symbol: str) -> float:
+        """Адаптивный порог стены по символу."""
+        return self._symbol_thresholds.get(symbol.upper(), self.min_volume_usdt)
 
     def on_signal(self, callback: Callable[[DepthShotSignal], None]):
         self._signal_callbacks.append(callback)
@@ -126,7 +141,7 @@ class DepthShotAnalyzer:
         # Ищем уровень объёма
         result = book.find_volume_level(
             side=side,
-            target_volume_usdt=self.min_volume_usdt,
+            target_volume_usdt=self._get_min_volume(symbol),
             min_distance_pct=self.min_distance_pct,
             max_distance_pct=self.max_distance_pct,
         )
@@ -134,7 +149,7 @@ class DepthShotAnalyzer:
         if result is None:
             logger.debug(
                 f"No volume level found for {symbol} {direction.value} "
-                f"min_vol={self.min_volume_usdt:,.0f}"
+                f"min_vol={self._get_min_volume(symbol):,.0f}"
             )
             return None
 
@@ -208,7 +223,7 @@ class DepthShotAnalyzer:
         for level in levels:
             price_diff_pct = abs(level.price - entry_price) / entry_price * 100
             if price_diff_pct <= self.buffer_pct:
-                if level.quote_volume >= self.min_volume_usdt * 0.5:
+                if level.quote_volume >= self._get_min_volume(symbol) * 0.5:
                     return True
 
         return False
@@ -257,7 +272,7 @@ class DepthShotAnalyzer:
             opposite_side = 'ask' if direction == Direction.LONG else 'bid'
             result = book.find_volume_level(
                 side=opposite_side,
-                target_volume_usdt=self.min_volume_usdt * 0.5,
+                target_volume_usdt=self._get_min_volume(symbol) * 0.5,
                 min_distance_pct=0.1,
                 max_distance_pct=self.max_distance_pct * 2,
             )
