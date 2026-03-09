@@ -184,9 +184,9 @@ class TestOpenPositionSuccess:
     async def test_tp_sl_prices_correct_long(self):
         pm = make_pm()
         entry = 50000.0
+        # v3: адаптивный TP = max(sl×2, atr×1.8, cfg). sl=1.5% → min TP=3.0% → 51500
         pos = await pm.open_position(make_signal('BTCUSDT', entry_price=entry, tp_price=50400.0))
-        # tp_price из сигнала (50400 = +0.8%)
-        assert pos.tp_price == pytest.approx(50400.0)
+        assert pos.tp_price == pytest.approx(entry * (1 + 3.0 / 100))  # sl×2=3%
         # sl = entry * (1 - 1.5%)
         assert pos.sl_price == pytest.approx(entry * (1 - 1.5 / 100))
 
@@ -476,11 +476,18 @@ class TestCalcQty:
 
     def test_calc_tp_uses_signal_if_reasonable(self):
         pm = make_pm()
+        # v3: signal_tp=50400 = +0.8%, sl=1.5% → sl×1.5=2.25% → 0.8% < 2.25% → адаптивный TP
         tp = pm._calc_tp('long', 50000.0, signal_tp=50400.0)
-        assert tp == pytest.approx(50400.0)
+        assert tp == pytest.approx(50000.0 * (1 + 3.0 / 100))  # sl×2=3%
+
+    def test_calc_tp_uses_signal_if_large_enough(self):
+        pm = make_pm()
+        # signal_tp=51600 = +3.2% >= sl×1.5=2.25% → используем сигнал
+        tp = pm._calc_tp('long', 50000.0, signal_tp=51600.0)
+        assert tp == pytest.approx(51600.0)
 
     def test_calc_tp_uses_config_if_signal_unreasonable(self):
         pm = make_pm()
-        # signal_tp слишком далеко (20%)
+        # signal_tp слишком далеко (20%) → адаптивный TP = sl×2=3%
         tp = pm._calc_tp('long', 50000.0, signal_tp=60000.0)
-        assert tp == pytest.approx(50000.0 * (1 + 0.8 / 100))
+        assert tp == pytest.approx(50000.0 * (1 + 3.0 / 100))

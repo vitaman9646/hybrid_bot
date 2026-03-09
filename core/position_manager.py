@@ -183,7 +183,7 @@ class PositionManager:
 
         # Считаем цены
         entry = signal.entry_price
-        tp = self._calc_tp(direction, entry, signal.tp_price)
+        tp = self._calc_tp(direction, entry, signal.tp_price, symbol)
         sl = self._calc_sl(direction, entry, symbol)
 
         # Получаем qty — используем size_usdt из RiskManager если задан
@@ -585,16 +585,42 @@ class PositionManager:
     # ------------------------------------------------------------------
 
     def _calc_tp(
-        self, direction: str, entry: float, signal_tp: float
+        self, direction: str, entry: float, signal_tp: float, symbol: str = ''
     ) -> float:
-        """Используем TP из сигнала если он разумный, иначе считаем сами."""
+        """v3: адаптивный TP = max(SL×2, ATR×1.8, config_tp).
+        Если сигнал даёт разумный TP — используем его если он >= SL×1.5.
+        """
+        # Считаем SL distance для минимального RR
+        sl_pct = self._sl_pct
+        if symbol and self._volatility:
+            vol_pct = self._volatility.get_volatility(symbol)
+            if isinstance(vol_pct, (int, float)) and vol_pct > 0:
+                sl_pct = max(sl_pct, vol_pct * 2.5)
+
+        # Адаптивный TP
+        atr_tp_pct = 0.0
+        if symbol and self._volatility:
+            vol_pct = self._volatility.get_volatility(symbol)
+            if isinstance(vol_pct, (int, float)) and vol_pct > 0:
+                atr_tp_pct = vol_pct * 1.8
+
+        tp_pct = max(
+            sl_pct * 2.0,       # минимум RR 1:2
+            atr_tp_pct,         # ATR×1.8
+            self._tp_pct,       # config floor
+        )
+
+        # Если сигнал даёт TP и он >= SL×1.5 — используем
         pct_from_signal = abs(signal_tp - entry) / entry * 100
-        if 0.05 < pct_from_signal < 10.0:
+        if 0.05 < pct_from_signal < 10.0 and pct_from_signal >= sl_pct * 1.5:
+            logger.debug("[%s] TP from signal: %.2f%% (sl=%.2f%%)", symbol, pct_from_signal, sl_pct)
             return signal_tp
-        # Считаем из конфига
+
+        logger.debug("[%s] TP adaptive: %.2f%% (sl×2=%.2f%% atr×1.8=%.2f%% cfg=%.2f%%)",
+                     symbol, tp_pct, sl_pct * 2.0, atr_tp_pct, self._tp_pct)
         if direction == 'long':
-            return entry * (1 + self._tp_pct / 100)
-        return entry * (1 - self._tp_pct / 100)
+            return entry * (1 + tp_pct / 100)
+        return entry * (1 - tp_pct / 100)
 
     def _calc_sl(self, direction: str, entry: float, symbol: str = '') -> float:
         """SL = max(min_sl_pct, ATR×2.5). ATR = volatility_tracker.get_volatility()."""
