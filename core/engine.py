@@ -11,6 +11,8 @@ import yaml
 
 from core.data_feed import BybitDataFeed
 from core.btc_bias import BTCDirectionBias
+from core.session_filter import SessionFilter
+from core.score_decay import ScoreDecay
 from core.mtf_filter import MTFDirectionFilter
 from core.latency_guard import LatencyGuard
 from core.orderbook import OrderBookManager
@@ -153,6 +155,8 @@ class HybridEngine:
 
         # BTCDirectionBias
         self.btc_bias = BTCDirectionBias(threshold_pct=0.3, window_sec=300)
+        self.session_filter = SessionFilter()
+        self.score_decay = ScoreDecay()
 
         # MTFDirectionFilter
         symbols = self.config.get('pairs', {}).get('symbols', [])
@@ -598,6 +602,26 @@ class HybridEngine:
             logger.warning("SIGNAL BLOCKED: InfrastructureCircuitBreaker active")
             return
 
+        # SessionFilter: проверяем сессию и сценарий
+        import time
+        scenario = signal.scenario.value if hasattr(signal.scenario, 'value') else str(signal.scenario)
+        allowed, sess_mult = self.session_filter.is_allowed(time.time(), scenario)
+        if not allowed:
+            session = self.session_filter.get_session(time.time())
+            logger.info("SIGNAL BLOCKED by SessionFilter [%s %s]: session=%s scenario=%s",
+                signal.symbol, signal.direction.value, session, scenario)
+            return
+        # Применяем score multiplier сессии
+        signal = signal._replace(confidence=signal.confidence * sess_mult) if hasattr(signal, '_replace') else signal
+
+        # ScoreDecay: затухание confidence со временем
+        decayed_confidence = self.score_decay.apply(signal.symbol, scenario, signal.confidence)
+        if decayed_confidence == 0.0:
+            logger.info("SIGNAL DEAD by ScoreDecay [%s %s]: age too old", signal.symbol, signal.direction.value)
+            return
+        if hasattr(signal, '_replace'):
+            signal = signal._replace(confidence=decayed_confidence)
+
         # FilterPipeline: проверяем сигнал
         result = await self.filter_pipeline.check(signal)
         if not result.passed:
@@ -637,6 +661,7 @@ class HybridEngine:
         confirmed = await self._entry_confirmation(signal)
         if not confirmed:
             logger.info("ENTRY REJECTED by EntryConfirmation [%s]", signal.symbol)
+            self.score_decay.clear(signal.symbol)
             return
 
         # Алерт с дедупликацией
