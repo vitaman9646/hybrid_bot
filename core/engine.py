@@ -13,6 +13,7 @@ from core.data_feed import BybitDataFeed
 from core.btc_bias import BTCDirectionBias
 from core.session_filter import SessionFilter
 from core.score_decay import ScoreDecay
+from core.regime_filter import RegimeFilter
 from core.mtf_filter import MTFDirectionFilter
 from core.latency_guard import LatencyGuard
 from core.orderbook import OrderBookManager
@@ -157,6 +158,7 @@ class HybridEngine:
         self.btc_bias = BTCDirectionBias(threshold_pct=0.3, window_sec=300)
         self.session_filter = SessionFilter()
         self.score_decay = ScoreDecay()
+        self.regime_filter = RegimeFilter()
 
         # MTFDirectionFilter
         symbols = self.config.get('pairs', {}).get('symbols', [])
@@ -338,6 +340,7 @@ class HybridEngine:
 
         # BTCDirectionBias: обновляем на каждом тике
         self.btc_bias.on_trade(trade.symbol, trade.price, trade.timestamp)
+        self.regime_filter.update(trade.symbol, trade.price * 1.001, trade.price * 0.999, trade.price)
 
         # Обновляем Averages (всегда)
         self.averages.on_trade(trade)
@@ -613,6 +616,16 @@ class HybridEngine:
             return
         # Применяем score multiplier сессии
         signal = signal._replace(confidence=signal.confidence * sess_mult) if hasattr(signal, '_replace') else signal
+
+        # RegimeFilter: проверяем режим рынка
+        regime_allowed, regime_mult = self.regime_filter.is_allowed(signal.symbol, scenario)
+        if not regime_allowed:
+            regime = self.regime_filter.get_regime(signal.symbol)
+            logger.info("SIGNAL BLOCKED by RegimeFilter [%s %s]: regime=%s scenario=%s",
+                signal.symbol, signal.direction.value, regime, scenario)
+            return
+        if hasattr(signal, '_replace') and regime_mult != 1.0:
+            signal = signal._replace(confidence=signal.confidence * regime_mult)
 
         # ScoreDecay: затухание confidence со временем
         decayed_confidence = self.score_decay.apply(signal.symbol, scenario, signal.confidence)
