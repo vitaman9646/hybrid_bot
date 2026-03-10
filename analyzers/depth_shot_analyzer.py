@@ -242,7 +242,7 @@ class DepthShotAnalyzer:
         )
         self._last_scan_time[symbol] = time.time()
 
-        for cb in self._signal_callbacks:
+        for cb in list(self._signal_callbacks):
             try:
                 cb(signal)
             except Exception as e:

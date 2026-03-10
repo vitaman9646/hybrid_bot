@@ -170,6 +170,13 @@ class SignalAggregator:
         if market_state in (MarketState.DEAD, MarketState.CHAOS):
             return None
 
+        # Временный диагностический лог
+        if self._total_evaluated % 500 == 0:
+            logger.info("[%s] evaluate: state=%s trend=%s vector=%s evaluated=%d",
+                        symbol, market_state, trend,
+                        vector_signal.direction if vector_signal else None,
+                        self._total_evaluated)
+
         signal = None
         if market_state == MarketState.NORMAL:
             signal = self._try_scenario4(symbol, vector_signal, current_price, trend, market_state)
@@ -351,17 +358,17 @@ class SignalAggregator:
         self._total_signals += 1
         self._signals_by_scenario[signal.scenario.value] += 1
         self._last_signal_time[symbol] = time.time()
-        logger.info("SIGNAL [%s] %s %s entry=%.2f tp=%.2f score=%.2f",
+        logger.info("SIGNAL [%s] %s %s entry=%.6f tp=%.6f score=%.2f",
                     signal.scenario.value, symbol, signal.direction.value,
                     signal.entry_price, signal.tp_price, signal.score)
-        for cb in self._signal_callbacks:
+        for cb in list(self._signal_callbacks):
             try:
                 cb(signal)
             except Exception as e:
                 logger.error("Aggregator callback error: %s", e)
 
     def _emit_exit(self, symbol, exit_signal):
-        for cb in self._exit_callbacks:
+        for cb in list(self._exit_callbacks):
             try:
                 cb(exit_signal)
             except Exception as e:

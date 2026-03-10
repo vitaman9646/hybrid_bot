@@ -17,7 +17,7 @@ WARN_THRESHOLD = 30
 CRIT_THRESHOLD = 120
 
 # Для major пар порог строже
-MAJOR_SYMBOLS = {'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'}
+MAJOR_SYMBOLS = {'BTCUSDT', 'ETHUSDT'}
 
 
 class DataHealthMonitor:

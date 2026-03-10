@@ -121,7 +121,7 @@ class AveragesAnalyzer:
         if signal:
             self._signals_generated += 1
             self._signals_by_symbol[symbol] = self._signals_by_symbol.get(symbol, 0) + 1
-            for cb in self._signal_callbacks:
+            for cb in list(self._signal_callbacks):
                 try:
                     cb(signal)
                 except Exception as e:

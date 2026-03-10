@@ -132,29 +132,23 @@ class MarketSaver:
         self._flush_trades()
 
     def _safe_commit(self):
-        try:
-            self._conn.execute("COMMIT")
-        except sqlite3.OperationalError:
-            pass  # no active transaction
+        pass  # autocommit mode (isolation_level=None)
 
     def _flush_trades(self):
         if not self._buf_trades:
             return
-        cur = self._conn.cursor()
         try:
-            self._conn.execute("BEGIN")
+            cur = self._conn.cursor()
             cur.executemany(
                 "INSERT INTO trades (symbol, price, qty, side, ts) VALUES (?,?,?,?,?)",
                 self._buf_trades,
             )
-            self._safe_commit()
             self._buf_trades.clear()
-        except sqlite3.OperationalError as e:
-            logger.warning("flush_trades error: %s", e)
-            try:
-                self._conn.execute("ROLLBACK")
-            except:
-                pass
+        except Exception as e:
+            import traceback
+            logger.warning("flush_trades error: %s\n%s", e, traceback.format_exc())
+            if self._buf_trades:
+                logger.warning("flush_trades sample: %s", self._buf_trades[0])
 
     # ------------------------------------------------------------------
     # Чтение

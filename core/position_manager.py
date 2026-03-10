@@ -59,6 +59,11 @@ class Position:
     close_price: float = 0.0
     close_reason: str = ""
 
+    # MFE/MAE tracking (v4)
+    mfe_pct: float = 0.0   # Max Favorable Excursion — макс движение в нашу сторону
+    mae_pct: float = 0.0   # Max Adverse Excursion — макс движение против нас
+    size_usdt: float = 0.0 # размер позиции в USDT
+
     @property
     def side(self) -> str:
         return 'Buy' if self.direction == 'long' else 'Sell'
@@ -187,6 +192,24 @@ class PositionManager:
             )
             return None
 
+        # TotalExposureGuard: суммарный риск всех позиций ≤ 3% equity
+        try:
+            balance = await self._executor.get_balance()
+            if balance and balance > 0:
+                new_risk_pct = (signal.size_usdt if signal.size_usdt > 0 else self._size_usdt) / balance * 100
+                total_risk = sum(
+                    (p.size_usdt / balance * 100)
+                    for p in self._positions.values()
+                    if hasattr(p, 'size_usdt') and p.size_usdt
+                )
+                if total_risk + new_risk_pct > 3.0:
+                    logger.warning(
+                        f"[{symbol}] TotalExposureGuard: total risk {total_risk:.1f}% + {new_risk_pct:.1f}% > 3.0%"
+                    )
+                    return None
+        except Exception as e:
+            logger.debug(f"TotalExposureGuard check failed: {e}")
+
         # Считаем цены
         entry = signal.entry_price
         tp = self._calc_tp(direction, entry, signal.tp_price, symbol)
@@ -273,6 +296,17 @@ class PositionManager:
         else:
             if price < pos.peak_price:
                 pos.peak_price = price
+
+        # MFE/MAE tracking (v4)
+        if pos.entry_price > 0:
+            if pos.direction == 'long':
+                favorable_pct = (price - pos.entry_price) / pos.entry_price * 100
+            else:
+                favorable_pct = (pos.entry_price - price) / pos.entry_price * 100
+            if favorable_pct > pos.mfe_pct:
+                pos.mfe_pct = favorable_pct
+            elif favorable_pct < -pos.mae_pct:
+                pos.mae_pct = abs(favorable_pct)
 
         # Trailing stop
         if pos.trailing_enabled:
@@ -363,7 +397,8 @@ class PositionManager:
             logger.info(
                 f"[{symbol}] Position CLOSED: "
                 f"reason={reason} "
-                f"pnl={pos.realized_pnl:+.2f} USDT"
+                f"pnl={pos.realized_pnl:+.2f} USDT "
+                f"MFE={pos.mfe_pct:+.2f}% MAE={pos.mae_pct:.2f}%"
             )
 
             # Обновляем статы

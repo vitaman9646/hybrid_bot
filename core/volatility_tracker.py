@@ -5,6 +5,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class VolatilityTracker:
         # Кеш рассчитанной волатильности
         self._cache: dict[str, tuple[float, float]] = {}
         self._cache_ttl = 0.5  # пересчитывать каждые 500мс
+        self._lock = threading.RLock()
     
     def update(
         self,
@@ -41,23 +43,24 @@ class VolatilityTracker:
         volume: float = 0.0,
     ):
         """Добавить ценовую точку"""
-        if symbol not in self._prices:
-            self._prices[symbol] = deque()
-        
-        self._prices[symbol].append(
-            PricePoint(timestamp, price, volume)
-        )
-        
-        # Eviction старых точек
-        cutoff = timestamp - self.window
-        while (
-            self._prices[symbol]
-            and self._prices[symbol][0].timestamp < cutoff
-        ):
-            self._prices[symbol].popleft()
-        
-        # Инвалидируем кеш
-        self._cache.pop(symbol, None)
+        with self._lock:
+            if symbol not in self._prices:
+                self._prices[symbol] = deque()
+            
+            self._prices[symbol].append(
+                PricePoint(timestamp, price, volume)
+            )
+            
+            # Eviction старых точек
+            cutoff = timestamp - self.window
+            while (
+                self._prices[symbol]
+                and self._prices[symbol][0].timestamp < cutoff
+            ):
+                self._prices[symbol].popleft()
+            
+            # Инвалидируем кеш
+            self._cache.pop(symbol, None)
     
     def get_volatility(self, symbol: str) -> float:
         """
@@ -76,7 +79,9 @@ class VolatilityTracker:
         ):
             return 0.0
         
-        prices = [p.price for p in self._prices[symbol]]
+        with self._lock:
+            with self._lock:
+                prices = [p.price for p in self._prices[symbol]]
         high = max(prices)
         low = min(prices)
         
@@ -98,18 +103,13 @@ class VolatilityTracker:
         ):
             return 0.0
         
-        total_volume = sum(
-            p.volume for p in self._prices[symbol]
-        )
+        with self._lock:
+            snapshot = list(self._prices[symbol])
+        total_volume = sum(p.volume for p in snapshot)
         if total_volume == 0:
-            # Fallback: простая средняя
-            prices = [p.price for p in self._prices[symbol]]
-            return sum(prices) / len(prices)
-        
-        vwap = sum(
-            p.price * p.volume for p in self._prices[symbol]
-        ) / total_volume
-        
+            prices = [p.price for p in snapshot]
+            return sum(prices) / len(prices) if prices else 0.0
+        vwap = sum(p.price * p.volume for p in snapshot) / total_volume
         return vwap
     
     def get_trade_count(self, symbol: str) -> int:
@@ -122,7 +122,9 @@ class VolatilityTracker:
         """Суммарный объём в окне"""
         if symbol not in self._prices:
             return 0.0
-        return sum(p.volume for p in self._prices[symbol])
+        with self._lock:
+            snapshot = list(self._prices[symbol])
+        return sum(p.volume for p in snapshot)
     
     def is_dead_market(
         self, symbol: str, threshold: float = 0.05
@@ -173,5 +175,5 @@ class VolatilityTracker:
     def get_all_stats(self) -> dict[str, dict]:
         return {
             symbol: self.get_stats(symbol)
-            for symbol in self._prices
+            for symbol in list(self._prices)
         }

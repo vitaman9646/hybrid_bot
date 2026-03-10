@@ -274,7 +274,7 @@ class TestReplayEngine:
             entry_ts=0.0, scenario="s1", size_usdt=100.0,
         )
         pnl = engine._calc_pnl(pos, 50400.0)
-        assert pnl == pytest.approx(0.68956, rel=1e-4)
+        assert pnl == pytest.approx(0.669480, rel=1e-4)
 
     def test_calc_pnl_short(self, tmp_path):
         engine, _ = self._make_engine(tmp_path)
@@ -286,7 +286,7 @@ class TestReplayEngine:
             entry_ts=0.0, scenario="s1", size_usdt=100.0,
         )
         pnl = engine._calc_pnl(pos, 49600.0)
-        assert pnl == pytest.approx(0.69044, rel=1e-4)
+        assert pnl == pytest.approx(0.670520, rel=1e-4)
 
     def test_check_exit_tp_long(self, tmp_path):
         engine, _ = self._make_engine(tmp_path)

@@ -1,5 +1,5 @@
 aggregator:
-  entry_threshold: 0.40
+  entry_threshold: 0.4
   imbalance_threshold: 0.55
   mode: weighted
   scenario4_vol_max: 3.0
@@ -8,26 +8,19 @@ aggregator:
   weight_averages: 0.3
   weight_depth: 0.2
   weight_vector: 0.5
-
-  # Per-scenario thresholds (v2)
   thresholds:
-    all_three:       0.40   # S4: все три подтверждают — можно ниже
-    averages_vector: 0.60   # S2: тренд + импульс
-    vector_depth:    0.55   # S1: импульс + уровень
-    averages_depth:  0.65   # S3: mean reversion — осторожнее
-
-  # Умный cooldown (v2)
+    all_three: 0.48
+    averages_vector: 0.62
+    vector_depth: 0.58
+    averages_depth: 0.68
   cooldown:
-    default:  60.0   # первый сигнал / неизвестный исход
-    after_tp: 45.0   # после тейка — рынок двигается, можно быстрее
-    after_sl: 120.0  # после стопа — пауза, рынок против нас
-
-  # Opposite exit (v2)
+    default: 60.0
+    after_tp: 45.0
+    after_sl: 120.0
   opposite_exit:
     enabled: true
-    close_threshold:   0.50   # score >= 0.50 → закрыть позицию
-    reverse_threshold: 0.85   # score >= 0.85 → закрыть + реверс
-
+    close_threshold: 0.5
+    reverse_threshold: 0.85
 analyzers:
   averages:
     long_period: 300.0
@@ -52,13 +45,11 @@ analyzers:
     min_trades_per_frame: 1
     time_frame: 0.6
     use_detect_shot: false
-
 dynamic_weights:
   enabled: true
   min_signals_required: 50
   store_in: memory
   update_interval: 14400
-
 filters:
   max_mark_deviation_pct: 0.3
   max_spread_pct: 0.3
@@ -66,9 +57,13 @@ filters:
   correlation_penalty: 0.6
   correlation_window_sec: 60
   correlated_pairs:
-    - [BTCUSDT, ETHUSDT]
-    - [SOLUSDT, AVAXUSDT, ADAUSDT]
-    - [BNBUSDT, XRPUSDT]
+  - - BTCUSDT
+    - ETHUSDT
+  - - SOLUSDT
+    - AVAXUSDT
+    - ADAUSDT
+  - - BNBUSDT
+    - XRPUSDT
   delta:
   - range:
     - 0.3
@@ -100,12 +95,10 @@ filters:
   volume_24h:
     max: 999999999999
     min: 5000000
-
 min_partial_sources: 2
 min_score: 0.5
 mode: weighted
 name: Hybrid Trend Impulse v2
-
 order:
   direction: auto
   grid:
@@ -136,9 +129,8 @@ order:
     adaptive: true
     enabled: true
     spread: 0.3
-    activation_pct: 0.4  # trailing активируется только после +0.4%
+    activation_pct: 0.4
   type: limit
-
 risk:
   corr_block_enabled: true
   daily_loss_limit_usdt: 20.0
@@ -154,12 +146,16 @@ risk:
   max_size_usdt: 50.0
   min_size_usdt: 5.0
   position_pct: 10.0
-  max_trades_per_day: 50
-  max_concurrent_positions: 4
-
+  max_trades_per_day: 25
+  max_concurrent_positions: 2
 circuit_breaker:
   max_consecutive_losses: 3
   max_losses_per_hour: 5
   max_drawdown_pct: 5.0
   soft_cooldown_sec: 900
   hard_cooldown_sec: 1800
+time_stop:
+  s1: 600
+  s2: 1200
+  s3: 1200
+  s4: 1800

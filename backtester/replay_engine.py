@@ -360,13 +360,31 @@ class ReplayEngine:
             scenario=pos.scenario,
         )
 
+    # Slippage model (v4) — базовое проскальзывание по символу
+    SLIPPAGE_PCT = {
+        'BTCUSDT': 0.0001,   # 0.01%
+        'ETHUSDT': 0.00015,  # 0.015%
+        'SOLUSDT': 0.0002,   # 0.02%
+        'BNBUSDT': 0.0002,   # 0.02%
+        'XRPUSDT': 0.00025,
+        'DOGEUSDT': 0.0003,
+        'ADAUSDT': 0.0003,
+        'AVAXUSDT': 0.0003,
+    }
+
     @staticmethod
     def _calc_pnl(pos: SimPosition, exit_price: float) -> float:
         TAKER_FEE = 0.00055  # Bybit taker 0.055%
+        slip = ReplayEngine.SLIPPAGE_PCT.get(pos.symbol, 0.0003)
+        # Entry: покупаем дороже (long) или продаём дешевле (short)
         if pos.direction == 'long':
-            gross = (exit_price - pos.entry_price) * pos.qty
+            adj_entry = pos.entry_price * (1 + slip)
+            adj_exit = exit_price * (1 - slip)
+            gross = (adj_exit - adj_entry) * pos.qty
         else:
-            gross = (pos.entry_price - exit_price) * pos.qty
-        entry_fee = pos.entry_price * pos.qty * TAKER_FEE
-        exit_fee = exit_price * pos.qty * TAKER_FEE
+            adj_entry = pos.entry_price * (1 - slip)
+            adj_exit = exit_price * (1 + slip)
+            gross = (adj_entry - adj_exit) * pos.qty
+        entry_fee = adj_entry * pos.qty * TAKER_FEE
+        exit_fee = adj_exit * pos.qty * TAKER_FEE
         return gross - entry_fee - exit_fee

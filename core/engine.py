@@ -10,6 +10,8 @@ import sys
 import yaml
 
 from core.data_feed import BybitDataFeed
+from core.btc_bias import BTCDirectionBias
+from core.mtf_filter import MTFDirectionFilter
 from core.latency_guard import LatencyGuard
 from core.orderbook import OrderBookManager
 from core.volatility_tracker import VolatilityTracker
@@ -149,6 +151,17 @@ class HybridEngine:
         self.aggregator.on_signal(self._on_aggregated_signal)
         self.aggregator.on_opposite_exit(self._on_opposite_exit)
 
+        # BTCDirectionBias
+        self.btc_bias = BTCDirectionBias(threshold_pct=0.3, window_sec=300)
+
+        # MTFDirectionFilter
+        symbols = self.config.get('pairs', {}).get('symbols', [])
+        self.mtf_filter = MTFDirectionFilter(
+            client=self.executor._client,
+            symbols=symbols,
+            update_interval=300,
+        )
+
         # Дедупликация алертов: symbol → last_alert_ts
         self._alert_dedup: dict[str, float] = {}
         self._alert_dedup_ttl: float = 60.0  # секунд между алертами на один символ
@@ -165,6 +178,7 @@ class HybridEngine:
         self.data_feed.on_orderbook_update(
             self._on_orderbook_update
         )
+        # MTFDirectionFilter запускается в run() после event loop готов
 
         # 10. Position Manager (Фаза 3)
         self.position_manager = PositionManager(
@@ -259,6 +273,9 @@ class HybridEngine:
                 self.data_feed.start(), name="data_feed"
             ),
             asyncio.create_task(
+                self.mtf_filter.start(), name="mtf_filter"
+            ),
+            asyncio.create_task(
                 self._stats_reporter(), name="stats_reporter"
             ),
             asyncio.create_task(
@@ -292,8 +309,9 @@ class HybridEngine:
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
+                    import traceback
                     logger.critical(
-                        f"Task {task.get_name()} failed: {e}"
+                        f"Task {task.get_name()} failed: {e}\n{traceback.format_exc()}"
                     )
 
         except Exception as e:
@@ -306,11 +324,16 @@ class HybridEngine:
         Callback для каждого трейда.
         Обновляем все анализаторы и оцениваем сигналы.
         """
+        _loop_start = time.time()
+
         # DataHealthMonitor: фиксируем входящий тик
         self.data_health.on_trade(trade.symbol)
 
         # MarketSaver: пишем тик в SQLite для Backtester
         self.market_saver.save_trade(trade)
+
+        # BTCDirectionBias: обновляем на каждом тике
+        self.btc_bias.on_trade(trade.symbol, trade.price, trade.timestamp)
 
         # Обновляем Averages (всегда)
         self.averages.on_trade(trade)
@@ -343,6 +366,15 @@ class HybridEngine:
                 self.position_manager.update_price(trade.symbol, trade.price),
                 self._loop,
             )
+
+        # LoopMonitor: замер времени обработки тика
+        _loop_ms = (time.time() - _loop_start) * 1000
+        if not hasattr(self, '_loop_latencies'):
+            from collections import deque
+            self._loop_latencies = deque(maxlen=1000)
+        self._loop_latencies.append(_loop_ms)
+        if _loop_ms > 100:
+            logger.warning("LoopMonitor: tick processing %.1fms > 100ms", _loop_ms)
 
     def _on_orderbook_update(self, message: dict):
         """
@@ -379,17 +411,193 @@ class HybridEngine:
         # Закрываем текущую позицию
         await self.position_manager.close_position(symbol, reason='opposite_exit')
 
-        # Реверс — открываем в обратную сторону
+        # Реверс — только если все 5 ограничений SafeReverse выполнены
         if reason == ExitReason.REVERSE:
+            if not self._safe_reverse_allowed(pos, exit_signal):
+                logger.info("REVERSE BLOCKED by SafeReverse rules [%s]", symbol)
+                return
             from models.signals import Direction
             new_dir = Direction.SHORT if pos.direction == Direction.LONG else Direction.LONG
             logger.info("REVERSE %s → %s", symbol, new_dir.value)
+            # Обновляем счётчик реверсов
+            import time as _time
+            self._reverse_timestamps.append(_time.time())
             # Даём рынку 200ms успокоиться
             await asyncio.sleep(0.2)
             # Сигнал реверса создаётся в следующем evaluate() цикле автоматически
 
+    async def _entry_confirmation(self, signal) -> bool:
+        """
+        EntryConfirmation: ждём 2s после сигнала.
+        Цена должна пойти в нашу сторону — 3+ favorable тика,
+        max adverse move < 0.03%.
+        """
+        from models.signals import Direction
+        symbol = signal.symbol
+        direction = signal.direction
+        entry_price = signal.entry_price
+
+        if entry_price <= 0:
+            return True  # нет данных — пропускаем проверку
+
+        favorable_ticks = 0
+        max_adverse_pct = 0.0
+        last_price = entry_price
+        deadline = time.time() + 2.0
+
+        while time.time() < deadline:
+            await asyncio.sleep(0.05)
+            # Берём последнюю цену из стакана
+            try:
+                ob = self.orderbook_manager.get_orderbook(symbol)
+                if ob:
+                    bid = ob.best_bid()
+                    ask = ob.best_ask()
+                    if bid and ask:
+                        current_price = (bid + ask) / 2
+                        if direction == Direction.LONG:
+                            if current_price > last_price:
+                                favorable_ticks += 1
+                            adverse_pct = (entry_price - current_price) / entry_price * 100
+                        else:
+                            if current_price < last_price:
+                                favorable_ticks += 1
+                            adverse_pct = (current_price - entry_price) / entry_price * 100
+                        max_adverse_pct = max(max_adverse_pct, adverse_pct)
+                        last_price = current_price
+
+                        # Ранний выход если цена сильно против нас
+                        if max_adverse_pct > 0.03:
+                            logger.debug(
+                                "EntryConfirmation REJECTED [%s]: adverse %.4f%%",
+                                symbol, max_adverse_pct
+                            )
+                            return False
+            except Exception:
+                pass
+
+        # Итог
+        confirmed = favorable_ticks >= 3 and max_adverse_pct <= 0.03
+        logger.debug(
+            "EntryConfirmation [%s]: favorable=%d adverse=%.4f%% → %s",
+            symbol, favorable_ticks, max_adverse_pct,
+            "OK" if confirmed else "REJECTED"
+        )
+        return confirmed
+
+    def _infra_circuit_breaker_active(self) -> bool:
+        """Проверка инфраструктурных проблем — блокировка входов"""
+        import time as _time
+
+        # Инициализация
+        if not hasattr(self, '_infra_cb_blocked_until'):
+            self._infra_cb_blocked_until = 0.0
+        if not hasattr(self, '_ws_reconnect_times'):
+            from collections import deque
+            self._ws_reconnect_times = deque(maxlen=20)
+
+        now = _time.time()
+
+        # Уже заблокированы?
+        if now < self._infra_cb_blocked_until:
+            return True
+
+        # ① Спред > 0.08% — проверяем через orderbook
+        try:
+            for symbol in list(self._positions_symbols if hasattr(self, '_positions_symbols') else []):
+                ob = self.orderbook_manager.get_orderbook(symbol)
+                if ob:
+                    bid, ask = ob.best_bid(), ob.best_ask()
+                    if bid and ask and ask > 0:
+                        spread_pct = (ask - bid) / ask * 100
+                        if spread_pct > 0.08:
+                            logger.warning("InfraCB: spread %.3f%% > 0.08%% on %s, blocking 5 min", spread_pct, symbol)
+                            self._infra_cb_blocked_until = now + 300
+                            return True
+        except Exception:
+            pass
+
+        # ② Loop latency > 200ms
+        try:
+            lat = self.latency_guard.get_stats()
+            if lat.get('ws_latency_ms', 0) > 200:
+                logger.warning("InfraCB: ws_latency %sms > 200ms, blocking", lat.get('ws_latency_ms'))
+                self._infra_cb_blocked_until = now + 300
+                return True
+        except Exception:
+            pass
+
+        # ③ WS reconnects > 5 за последний час
+        try:
+            hour_ago = now - 3600
+            recent_reconnects = sum(1 for t in self._ws_reconnect_times if t > hour_ago)
+            if recent_reconnects > 5:
+                logger.warning("InfraCB: %d WS reconnects in last hour, blocking", recent_reconnects)
+                self._infra_cb_blocked_until = now + 1800
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _safe_reverse_allowed(self, pos, exit_signal) -> bool:
+        """5 ограничений SafeReverse — реверс только если все выполнены"""
+        import time as _time
+        from collections import deque
+
+        # Инициализация счётчиков если нет
+        if not hasattr(self, '_reverse_timestamps'):
+            self._reverse_timestamps = deque(maxlen=10)
+        if not hasattr(self, '_last_reverse_time'):
+            self._last_reverse_time = 0.0
+
+        now = _time.time()
+
+        # ① Позиция не в убытке > 0.5×ATR
+        try:
+            atr = self.volatility_tracker.get_atr(pos.symbol)
+            if atr and pos.unrealized_pnl_pct < -(0.5 * atr / pos.entry_price * 100):
+                logger.info("SafeReverse ①: position in loss > 0.5×ATR")
+                return False
+        except Exception:
+            pass
+
+        # ② Сценарий реверса = S2 или S4 (трендовые)
+        scenario = getattr(exit_signal, 'scenario', None)
+        if scenario is not None:
+            from analyzers.signal_aggregator import Scenario
+            allowed_scenarios = {Scenario.AVERAGES_VECTOR, Scenario.ALL_THREE}
+            if scenario not in allowed_scenarios:
+                logger.info("SafeReverse ②: scenario %s not trending", scenario)
+                return False
+
+        # ③ Прошло >10 минут с последнего реверса
+        if now - self._last_reverse_time < 600:
+            logger.info("SafeReverse ③: last reverse < 10 min ago")
+            return False
+
+        # ④ Не более 2 реверсов за день
+        day_start = now - 86400
+        reverses_today = sum(1 for t in self._reverse_timestamps if t > day_start)
+        if reverses_today >= 2:
+            logger.info("SafeReverse ④: %d reverses today >= 2", reverses_today)
+            return False
+
+        # ⑤ Направление реверса совпадает с MTF трендом (если есть)
+        # MTFDirectionFilter будет добавлен в Сессии 2, пока пропускаем
+        # if hasattr(self, 'mtf_filter'):
+        #     ...
+
+        self._last_reverse_time = now
+        return True
+
     async def _filter_and_handle_signal(self, signal):
         """Обработка финального сигнала от агрегатора"""
+        # InfrastructureCircuitBreaker
+        if self._infra_circuit_breaker_active():
+            logger.warning("SIGNAL BLOCKED: InfrastructureCircuitBreaker active")
+            return
+
         # FilterPipeline: проверяем сигнал
         result = await self.filter_pipeline.check(signal)
         if not result.passed:
@@ -401,10 +609,36 @@ class HybridEngine:
         logger.info(
             f"AGGREGATED SIGNAL: [{signal.scenario.value}] "
             f"{signal.symbol} {signal.direction.value} "
-            f"entry={signal.entry_price:.2f} "
-            f"tp={signal.tp_price:.2f} "
+            f"entry={signal.entry_price:.6f} "
+            f"tp={signal.tp_price:.6f} "
             f"confidence={signal.confidence:.2f}"
         )
+
+        # BTCDirectionBias: блок если BTC идёт против направления альта
+        if self.btc_bias.is_blocked(signal.symbol, signal.direction.value):
+            logger.info(
+                "SIGNAL BLOCKED by BTCBias [%s %s]: BTC bias=%s",
+                signal.symbol, signal.direction.value, self.btc_bias.get_bias()
+            )
+            return
+
+        # MTFDirectionFilter: блок против тренда на 15m/1h
+        scenario = signal.scenario.value if hasattr(signal.scenario, 'value') else str(signal.scenario)
+        if self.mtf_filter.is_blocked(signal.symbol, signal.direction.value, scenario):
+            logger.info(
+                "SIGNAL BLOCKED by MTF [%s %s]: bias=%s strength=%.1f",
+                signal.symbol, signal.direction.value,
+                self.mtf_filter.get_bias(signal.symbol).value,
+                self.mtf_filter.get_strength(signal.symbol)
+            )
+            return
+
+        # EntryConfirmation: ждём 2s — цена должна пойти в нашу сторону
+        confirmed = await self._entry_confirmation(signal)
+        if not confirmed:
+            logger.info("ENTRY REJECTED by EntryConfirmation [%s]", signal.symbol)
+            return
+
         # Алерт с дедупликацией
         now = time.time()
         last_alert = self._alert_dedup.get(signal.symbol, 0)
@@ -603,7 +837,21 @@ class HybridEngine:
             'pairs', {}
         ).get('symbols', [])
 
+        # LoopMonitor P99
+        loop_stats = {}
+        if hasattr(self, '_loop_latencies') and self._loop_latencies:
+            import statistics
+            lats = list(self._loop_latencies)
+            lats.sort()
+            p99_idx = int(len(lats) * 0.99)
+            loop_stats = {
+                'p99_ms': round(lats[p99_idx], 2),
+                'max_ms': round(max(lats), 2),
+                'avg_ms': round(statistics.mean(lats), 2),
+            }
+
         return {
+            'loop_monitor': loop_stats,
             'data_feed': self.data_feed.get_stats(),
             'latency': self.latency_guard.get_stats(),
             'orderbooks': self.orderbook_manager.get_all_stats(),

@@ -138,7 +138,7 @@ class RiskManager:
         # 5. Корреляционный блок
         if self.cfg.corr_block_enabled:
             base = self._base_asset(symbol)
-            for open_sym in self._open_symbols:
+            for open_sym in list(self._open_symbols):
                 if self._base_asset(open_sym) == base and open_sym != symbol:
                     return RiskDecision(
                         allowed=False, size_usdt=0.0,

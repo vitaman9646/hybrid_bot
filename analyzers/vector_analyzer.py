@@ -115,6 +115,7 @@ class VectorAnalyzer:
 
         # Статистика
         self._signals_generated: int = 0
+        self._signal_history: dict[str, deque] = {}  # symbol → deque[(direction, ts)]
         self._signals_by_symbol: dict[str, int] = {}
 
         # Callbacks
@@ -163,7 +164,7 @@ class VectorAnalyzer:
             self._signals_by_symbol[symbol] = (
                 self._signals_by_symbol.get(symbol, 0) + 1
             )
-            for cb in self._signal_callbacks:
+            for cb in list(self._signal_callbacks):
                 try:
                     cb(signal)
                 except Exception as e:
@@ -290,6 +291,39 @@ class VectorAnalyzer:
             f"confidence={confidence:.2f} "
             f"state={market_state.value}"
         )
+
+        # VectorPersistence: 2 из 3 последних сигналов в одном направлении
+        if symbol not in self._signal_history:
+            self._signal_history[symbol] = deque(maxlen=3)
+        self._signal_history[symbol].append((direction, now))
+
+        history = list(self._signal_history[symbol])
+        if len(history) >= 2:
+            same_dir = sum(1 for d, _ in history if d == direction)
+            if same_dir < 2:
+                logger.debug("VectorPersistence: only %d/%d in same direction, skipping", same_dir, len(history))
+                return None
+            # Нарастающий импульс → boost, угасающий → penalty
+            if same_dir == len(history):
+                signal = VectorSignal(
+                    symbol=signal.symbol, direction=signal.direction,
+                    timestamp=signal.timestamp, spread_pct=signal.spread_pct,
+                    upper_border=signal.upper_border, lower_border=signal.lower_border,
+                    frame_count=signal.frame_count,
+                    avg_volume_per_frame=signal.avg_volume_per_frame,
+                    confidence=min(signal.confidence * 1.15, 1.0),
+                    market_state=signal.market_state, is_shot=signal.is_shot,
+                )
+            else:
+                signal = VectorSignal(
+                    symbol=signal.symbol, direction=signal.direction,
+                    timestamp=signal.timestamp, spread_pct=signal.spread_pct,
+                    upper_border=signal.upper_border, lower_border=signal.lower_border,
+                    frame_count=signal.frame_count,
+                    avg_volume_per_frame=signal.avg_volume_per_frame,
+                    confidence=signal.confidence * 0.85,
+                    market_state=signal.market_state, is_shot=signal.is_shot,
+                )
 
         return signal
 
@@ -531,7 +565,7 @@ class VectorAnalyzer:
             'total_signals': self._signals_generated,
             'symbols': {
                 sym: self.get_stats(sym)
-                for sym in self._frames.keys()
+                for sym in list(self._frames.keys())
             },
             'config': {
                 'frame_size': self.frame_size,

@@ -84,7 +84,7 @@ class BybitDataFeed:
     @property
     def _symbols(self) -> list[str]:
         result = []
-        for conn in self._connections:
+        for conn in list(self._connections):
             result.extend(conn.symbols)
         return result
 
@@ -134,7 +134,7 @@ class BybitDataFeed:
 
     async def stop(self):
         self._running = False
-        for conn in self._connections:
+        for conn in list(self._connections):
             self._exit_ws(conn)
         logger.info("DataFeed stopped")
 
@@ -149,7 +149,7 @@ class BybitDataFeed:
             logger.info(f"Dynamically added {symbol} -> connection #{target.index}")
 
     def remove_symbol(self, symbol: str):
-        for conn in self._connections:
+        for conn in list(self._connections):
             if symbol in conn.symbols:
                 conn.symbols.remove(symbol)
                 logger.info(f"Removed symbol: {symbol}")
@@ -315,7 +315,7 @@ class BybitDataFeed:
 
             now = time.time()
 
-            for conn in self._connections:
+            for conn in list(self._connections):
                 if conn.connected and conn.is_stale(self._stale_timeout):
                     logger.warning(
                         f"Connection #{conn.index} stale "
