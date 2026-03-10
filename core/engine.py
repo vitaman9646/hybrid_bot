@@ -174,7 +174,7 @@ class HybridEngine:
 
         # 9. Filter Pipeline (Фаза 3)
         self.filter_pipeline = FilterPipeline(
-            self.strategy,
+            self.config,
             http_client=self.executor._client,
             orderbook_manager=self.orderbook_manager,
         )
