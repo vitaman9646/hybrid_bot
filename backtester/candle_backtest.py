@@ -15,8 +15,19 @@ THRESHOLDS = {'all_three':0.30,'averages_vector':0.45,'averages_depth':0.50,'vec
 SL_PCT = 0.012
 SIZE_USDT = 50.0
 RISK_PCT = 0.015  # 1.5% risk per trade
-PHASE1 = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT']
-DB_MAP = {'BTCUSDT':'klines_btc.db','ETHUSDT':'klines_eth.db','SOLUSDT':'klines_sol_bnb.db','BNBUSDT':'klines_sol_bnb.db','XRPUSDT':'klines_rest.db','DOGEUSDT':'klines_rest.db','ADAUSDT':'klines_rest.db','AVAXUSDT':'klines_rest.db'}
+
+# Per-symbol SL/TP overrides (optimized)
+SYMBOL_PARAMS = {
+    'BTCUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
+    'ETHUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
+    'SOLUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
+    'BNBUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
+    'XRPUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
+    'DOGEUSDT': {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
+    'AVAXUSDT': {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
+}
+PHASE1 = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','DOGEUSDT','AVAXUSDT']
+DB_MAP = {'BTCUSDT':'klines_btc.db','ETHUSDT':'klines_eth.db','SOLUSDT':'klines_sol_bnb.db','BNBUSDT':'klines_sol_bnb.db','XRPUSDT':'klines_rest.db','DOGEUSDT':'klines_rest.db','ADAUSDT':'klines_rest.db','AVAXUSDT':'klines_rest.db','LINKUSDT':'klines_new_coins.db','LTCUSDT':'klines_new_coins.db','ARBUSDT':'klines_new_coins.db','SUIUSDT':'klines_new_coins.db','NEARUSDT':'klines_new_coins.db','OPUSDT':'klines_new_coins.db'}
 
 @dataclass
 class Candle:
@@ -159,9 +170,11 @@ class CandleBacktest:
                 self._open(c,mr,'averages_depth',atr); return
 
     def _open(self,c,direction,scenario,atr):
-        p=c.close; sl_pct=max(SL_PCT,atr*2.5/p if atr>0 else SL_PCT)
-        tp1_pct=max(sl_pct*1.5,atr*1.5/p if atr>0 else sl_pct*1.5)
-        tp2_pct=max(sl_pct*2.5,atr*2.5/p if atr>0 else sl_pct*2.5)
+        p=c.close
+        sp=SYMBOL_PARAMS.get(self.symbol,{'sl':SL_PCT,'tp1_mult':1.5,'tp2_mult':2.5})
+        sl_pct=max(sp['sl'],atr*2.5/p if atr>0 else sp['sl'])
+        tp1_pct=max(sl_pct*sp['tp1_mult'],atr*1.5/p if atr>0 else sl_pct*sp['tp1_mult'])
+        tp2_pct=max(sl_pct*sp['tp2_mult'],atr*2.5/p if atr>0 else sl_pct*sp['tp2_mult'])
         sl=p*(1-sl_pct) if direction=='long' else p*(1+sl_pct)
         tp1=p*(1+tp1_pct) if direction=='long' else p*(1-tp1_pct)
         tp2=p*(1+tp2_pct) if direction=='long' else p*(1-tp2_pct)
