@@ -140,6 +140,76 @@ class TelegramAlerts:
         )
         await self.send(msg, urgent=(level in ('critical', 'emergency')))
     
+    async def alert_trade_open(
+        self,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        qty: float,
+        size_usdt: float,
+        tp_price: float,
+        sl_price: float,
+        scenario: str = "",
+        tp_ladder: object = None,
+    ):
+        if not self.alert_on_trade:
+            return
+        emoji = "??" if direction == 'long' else "??"
+        arrow = "⬆️ LONG" if direction == 'long' else "⬇️ SHORT"
+        sl_pct = abs(entry_price - sl_price) / entry_price * 100
+        tp_pct = abs(tp_price - entry_price) / entry_price * 100
+
+        ladder_str = ""
+        if tp_ladder and hasattr(tp_ladder, 'levels') and len(tp_ladder.levels) > 1:
+            ladder_parts = []
+            for l in tp_ladder.levels:
+                ladder_parts.append(f"{l.price:.2f} ({l.fraction*100:.0f}%)")
+            ladder_str = f"\nTP Ladder: {' → '.join(ladder_parts)}"
+
+        msg = (
+            f"{emoji} <b>{arrow} {symbol}</b>\n"
+            f"Entry: <code>{entry_price:.4f}</code>\n"
+            f"Size: {size_usdt:.2f} USDT ({qty} contracts)\n"
+            f"TP: {tp_price:.4f} (+{tp_pct:.2f}%)\n"
+            f"SL: {sl_price:.4f} (-{sl_pct:.2f}%)"
+            f"{ladder_str}"
+        )
+        if scenario:
+            msg += f"\nScenario: <i>{scenario}</i>"
+        await self.send(msg)
+
+    async def alert_trade_close(
+        self,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        exit_price: float,
+        qty: float,
+        size_usdt: float,
+        pnl_usdt: float,
+        reason: str = "",
+        duration_sec: int = 0,
+    ):
+        if not self.alert_on_trade:
+            return
+        pnl_pct = pnl_usdt / size_usdt * 100 if size_usdt > 0 else 0
+        pnl_emoji = "✅" if pnl_usdt >= 0 else "❌"
+        reason_emoji = {
+            'tp': '??', 'sl': '??️', 'time_stop': '⏱️',
+            'momentum_fade': '??', 'opposite_exit': '??',
+            'max_drawdown': '⚠️', 'manual': '??️',
+        }.get(reason, '??')
+
+        dur_str = f"{duration_sec//60}m {duration_sec%60}s" if duration_sec else "?"
+        msg = (
+            f"{pnl_emoji} <b>CLOSE {symbol}</b> {reason_emoji}\n"
+            f"Direction: {'LONG' if direction=='long' else 'SHORT'}\n"
+            f"Entry: {entry_price:.4f} → Exit: {exit_price:.4f}\n"
+            f"PnL: <b>{pnl_usdt:+.4f} USDT ({pnl_pct:+.2f}%)</b>\n"
+            f"Reason: {reason} | Duration: {dur_str}"
+        )
+        await self.send(msg, urgent=(pnl_usdt < -size_usdt * 0.02))
+
     async def alert_daily_summary(self, stats: dict):
         msg = (
             f"📊 <b>Daily Summary</b>\n"

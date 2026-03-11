@@ -89,3 +89,22 @@ strategy:
     confirm_s: 3.0
     min_ticks: 10
     max_loss_pct: 0.05
+
+  time_stop_sec: 1800
+
+risk:
+  risk_per_trade_pct: 1.5
+  position_pct: 15.0
+  sl_pct_default: 1.2
+  min_size_usdt: 5.0
+  max_size_usdt: 200.0
+  max_trades_per_day: 50
+  max_concurrent_positions: 4
+  max_consecutive_losses: 3
+  consecutive_loss_size_mult: 0.5
+  daily_loss_limit_pct: 2.0
+  score_sizing_enabled: true
+  score_size_min_mult: 0.6
+  score_size_max_mult: 1.4
+  daily_profit_boost: 1.2
+  daily_loss_reduce: 0.5

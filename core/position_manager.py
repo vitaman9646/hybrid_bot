@@ -135,6 +135,7 @@ class PositionManager:
         # Лимиты
         self._max_positions: int = config.get('max_positions', 5)
         self._max_drawdown_pct: float = order_cfg.get('max_drawdown_pct', 5.0)
+        self._time_stop_sec: float = order_cfg.get('time_stop_sec', 1800.0)  # 30 min default
 
         # Компоненты
         self._executor = executor
@@ -296,6 +297,20 @@ class PositionManager:
             f"order_id={pos.entry_order_id}"
         )
 
+        # Telegram: уведомление об открытии
+        if self._alerts is not None:
+            asyncio.create_task(self._alerts.alert_trade_open(
+                symbol=pos.symbol,
+                direction=pos.direction,
+                entry_price=pos.entry_price,
+                qty=pos.qty,
+                size_usdt=pos.size_usdt,
+                tp_price=pos.tp_price,
+                sl_price=pos.sl_price,
+                scenario=getattr(pos, 'scenario', ''),
+                tp_ladder=pos.tp_ladder,
+            ))
+
         # Размещаем TP и SL параллельно
         await asyncio.gather(
             self._place_tp(pos),
@@ -320,6 +335,17 @@ class PositionManager:
         else:
             if price < pos.peak_price:
                 pos.peak_price = price
+
+        # Time-stop: hard limit на время жизни позиции
+        if self._time_stop_sec > 0:
+            age_sec = time.time() - pos.timestamp
+            if age_sec >= self._time_stop_sec:
+                logger.warning(
+                    "[%s] TIME-STOP: position open %.0fs >= limit %.0fs",
+                    symbol, age_sec, self._time_stop_sec
+                )
+                await self.close_position(symbol, reason='time_stop', current_price=price)
+                return
 
 
     # MFE/MAE tracking (v4)
@@ -419,6 +445,21 @@ class PositionManager:
 
         if close_result:
             pos.state = PositionState.CLOSED
+
+            # Telegram: уведомление о закрытии
+            if self._alerts is not None:
+                duration = int(time.time() - pos.timestamp)
+                asyncio.create_task(self._alerts.alert_trade_close(
+                    symbol=pos.symbol,
+                    direction=pos.direction,
+                    entry_price=pos.entry_price,
+                    exit_price=current_price or pos.close_price or pos.tp_price,
+                    qty=pos.qty,
+                    size_usdt=pos.size_usdt,
+                    pnl_usdt=pos.realized_pnl,
+                    reason=reason,
+                    duration_sec=duration,
+                ))
             pos.close_price = current_price or pos.entry_price
             pos.realized_pnl = self._calc_pnl(pos)
 

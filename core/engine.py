@@ -202,13 +202,25 @@ class HybridEngine:
         )
 
         # 11. Risk Manager
-        risk_cfg = self.strategy.get('risk', {})
+        risk_cfg = self.config.get('risk', self.strategy.get('risk', {}))
         self.risk_manager = RiskManager(RiskConfig(
-            position_pct=risk_cfg.get('position_pct', 2.0),
+            risk_per_trade_pct=risk_cfg.get('risk_per_trade_pct', 1.5),
+            position_pct=risk_cfg.get('position_pct', 15.0),
+            sl_pct_default=risk_cfg.get('sl_pct_default', 1.2),
+            daily_loss_limit_pct=risk_cfg.get('daily_loss_limit_pct', 2.0),
             daily_loss_limit_usdt=risk_cfg.get('daily_loss_limit_usdt', 50.0),
             corr_block_enabled=risk_cfg.get('corr_block_enabled', True),
             min_size_usdt=risk_cfg.get('min_size_usdt', 5.0),
-            max_size_usdt=risk_cfg.get('max_size_usdt', 500.0),
+            max_size_usdt=risk_cfg.get('max_size_usdt', 200.0),
+            max_trades_per_day=risk_cfg.get('max_trades_per_day', 50),
+            max_concurrent_positions=risk_cfg.get('max_concurrent_positions', 4),
+            max_consecutive_losses=risk_cfg.get('max_consecutive_losses', 3),
+            consecutive_loss_size_mult=risk_cfg.get('consecutive_loss_size_mult', 0.5),
+            score_sizing_enabled=risk_cfg.get('score_sizing_enabled', True),
+            score_size_min_mult=risk_cfg.get('score_size_min_mult', 0.6),
+            score_size_max_mult=risk_cfg.get('score_size_max_mult', 1.4),
+            daily_profit_boost=risk_cfg.get('daily_profit_boost', 1.2),
+            daily_loss_reduce=risk_cfg.get('daily_loss_reduce', 0.5),
         ))
         self.position_manager._risk_manager = self.risk_manager
         self.position_manager._circuit_breaker = self.circuit_breaker
