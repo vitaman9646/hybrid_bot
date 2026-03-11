@@ -19,14 +19,14 @@ RISK_PCT = 0.015  # 1.5% risk per trade
 # Per-symbol SL/TP overrides (optimized)
 SYMBOL_PARAMS = {
     'BTCUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
-    'ETHUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
+    'ETHUSDT':  {'sl': 0.010, 'tp1_mult': 1.20, 'tp2_mult': 2.40},
     'SOLUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
     'BNBUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
     'XRPUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
     'DOGEUSDT': {'sl': 0.0132, 'tp1_mult': 1.20, 'tp2_mult': 2.40},
     'AVAXUSDT': {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
 }
-PHASE1 = ['BTCUSDT','SOLUSDT','BNBUSDT','XRPUSDT','AVAXUSDT','DOGEUSDT']
+PHASE1 = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','AVAXUSDT','DOGEUSDT']
 DB_MAP = {'BTCUSDT':'klines_btc.db','ETHUSDT':'klines_eth.db','SOLUSDT':'klines_sol_bnb.db','BNBUSDT':'klines_sol_bnb.db','XRPUSDT':'klines_rest.db','DOGEUSDT':'klines_rest.db','ADAUSDT':'klines_rest.db','AVAXUSDT':'klines_rest.db','LINKUSDT':'klines_new_coins.db','LTCUSDT':'klines_new_coins.db','ARBUSDT':'klines_new_coins.db','SUIUSDT':'klines_new_coins.db','NEARUSDT':'klines_new_coins.db','OPUSDT':'klines_new_coins.db'}
 
 @dataclass
