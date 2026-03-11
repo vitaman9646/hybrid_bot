@@ -181,8 +181,9 @@ class HybridEngine:
         self._alert_dedup_ttl: float = 60.0  # секунд между алертами на один символ
 
         # 9. Filter Pipeline (Фаза 3)
+        fp_cfg = {**self.config.get('filter_pipeline', {}), **self.config}
         self.filter_pipeline = FilterPipeline(
-            self.config,
+            fp_cfg,
             http_client=self.executor._client,
             orderbook_manager=self.orderbook_manager,
         )
@@ -356,14 +357,32 @@ class HybridEngine:
         # DataHealthMonitor: фиксируем входящий тик
         self.data_health.on_trade(trade.symbol)
 
-        # MarketSaver: пишем тик в SQLite для Backtester
-        self.market_saver.save_trade(trade)
+        # MarketSaver: пишем тик в SQLite — семплируем каждый 5-й тик
+        if not hasattr(self, '_market_saver_counter'):
+            self._market_saver_counter = {}
+        self._market_saver_counter[trade.symbol] = self._market_saver_counter.get(trade.symbol, 0) + 1
+        if self._market_saver_counter[trade.symbol] % 5 == 0:
+            self.market_saver.save_trade(trade)
 
-        # BTCDirectionBias: обновляем на каждом тике
-        self.btc_bias.on_trade(trade.symbol, trade.price, trade.timestamp)
-        self.regime_filter.update(trade.symbol, trade.price * 1.001, trade.price * 0.999, trade.price)
+        # MomentumFadeExit: обновляем тики (каждый тик, но только если есть позиция)
+        if self.position_manager.has_position(trade.symbol):
+            self.momentum_fade.update(trade.symbol, trade.price, trade.timestamp)
 
-        # Обновляем Averages (всегда)
+        # DepthShotV2 tracker: только если есть позиция
+        if self.position_manager.has_position(trade.symbol):
+            self.depth_v2._tracker.update(
+                trade.symbol,
+                'bid' if trade.side == 'Buy' else 'ask',
+                trade.price,
+                trade.qty * trade.price,
+            )
+
+        # BTCDirectionBias: каждый 3-й тик
+        if self._market_saver_counter.get(trade.symbol, 0) % 3 == 0:
+            self.btc_bias.on_trade(trade.symbol, trade.price, trade.timestamp)
+            self.regime_filter.update(trade.symbol, trade.price * 1.001, trade.price * 0.999, trade.price)
+
+        # Обновляем Averages (всегда — критично для сигналов)
         self.averages.on_trade(trade)
 
         # Обновляем Vector — он возвращает сигнал если условия выполнены
@@ -395,14 +414,7 @@ class HybridEngine:
                 self._loop,
             )
 
-        # MomentumFadeExit: обновляем тики и проверяем угасание
-        self.momentum_fade.update(trade.symbol, trade.price, trade.timestamp)
-        self.depth_v2._tracker.update(
-            trade.symbol,
-            'bid' if trade.side == 'Buy' else 'ask',
-            trade.price,
-            trade.qty * trade.price,
-        )
+        # MomentumFadeExit: проверяем угасание только если есть позиция
         if self.position_manager.has_position(trade.symbol) and self._loop:
             pos = self.position_manager.get_position(trade.symbol)
             if pos:
@@ -424,8 +436,10 @@ class HybridEngine:
             from collections import deque
             self._loop_latencies = deque(maxlen=1000)
         self._loop_latencies.append(_loop_ms)
-        if _loop_ms > 100:
-            logger.warning("LoopMonitor: tick processing %.1fms > 100ms", _loop_ms)
+        if _loop_ms > 200:
+            logger.warning("LoopMonitor: tick processing %.1fms > 200ms", _loop_ms)
+        elif _loop_ms > 150:
+            logger.debug("LoopMonitor: tick processing %.1fms > 150ms", _loop_ms)
 
     def _on_orderbook_update(self, message: dict):
         """
@@ -518,7 +532,7 @@ class HybridEngine:
                         last_price = current_price
 
                         # Ранний выход если цена сильно против нас
-                        if max_adverse_pct > 0.05:
+                        if max_adverse_pct > 0.08:
                             logger.debug(
                                 "EntryConfirmation REJECTED [%s]: adverse %.4f%%",
                                 symbol, max_adverse_pct
@@ -528,7 +542,7 @@ class HybridEngine:
                 pass
 
         # Итог
-        confirmed = favorable_ticks >= 2 and max_adverse_pct <= 0.05
+        confirmed = favorable_ticks >= 1 and max_adverse_pct <= 0.08
         logger.debug(
             "EntryConfirmation [%s]: favorable=%d adverse=%.4f%% → %s",
             symbol, favorable_ticks, max_adverse_pct,
