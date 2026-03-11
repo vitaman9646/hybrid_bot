@@ -23,8 +23,8 @@ class SessionFilter:
     def get_session(self, ts: float) -> str:
         h = datetime.fromtimestamp(ts, tz=timezone.utc).hour
         if 2 <= h < 6:   return 'DEAD'
-        elif 6 <= h < 12: return 'ASIA'
-        elif 12 <= h < 16: return 'LONDON'
+        elif 6 <= h < 8: return 'ASIA'
+        elif 8 <= h < 13: return 'LONDON'
         elif 16 <= h < 21: return 'NY'
         else: return 'QUIET'
 
