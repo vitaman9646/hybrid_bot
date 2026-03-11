@@ -54,6 +54,9 @@ pairs:
   - ETHUSDT
   - SOLUSDT
   - BNBUSDT
+  - XRPUSDT
+  - DOGEUSDT
+  - AVAXUSDT
 storage:
   market_db: data/market.db
 strategy:
