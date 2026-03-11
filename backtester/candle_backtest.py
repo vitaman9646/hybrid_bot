@@ -11,10 +11,10 @@ from collections import deque
 
 TAKER_FEE = 0.00055
 SLIPPAGE = {'BTCUSDT':0.0001,'ETHUSDT':0.00015,'SOLUSDT':0.0002,'BNBUSDT':0.0002,'XRPUSDT':0.00025,'DOGEUSDT':0.0003,'ADAUSDT':0.0003,'AVAXUSDT':0.0003}
-THRESHOLDS = {'all_three':0.48,'averages_vector':0.62,'averages_depth':0.68}
+THRESHOLDS = {'all_three':0.30,'averages_vector':0.45,'averages_depth':0.50,'vector_depth':0.40}
 SL_PCT = 0.012
 SIZE_USDT = 50.0
-RISK_PCT = 0.0075
+RISK_PCT = 0.015  # 1.5% risk per trade
 PHASE1 = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT']
 DB_MAP = {'BTCUSDT':'klines_btc.db','ETHUSDT':'klines_eth.db','SOLUSDT':'klines_sol_bnb.db','BNBUSDT':'klines_sol_bnb.db','XRPUSDT':'klines_rest.db','DOGEUSDT':'klines_rest.db','ADAUSDT':'klines_rest.db','AVAXUSDT':'klines_rest.db'}
 
@@ -28,7 +28,7 @@ class Trade:
     exit_ts:float=0.0; exit_price:float=0.0; exit_reason:str=''; pnl_usdt:float=0.0; pnl_pct:float=0.0; session:str=''; mfe_pct:float=0.0; mae_pct:float=0.0
 
 def get_session(ts):
-    h = datetime.fromtimestamp(ts, tz=timezone.utc).hour
+    h = datetime.fromtimestamp(ts if ts < 1e10 else ts/1000, tz=timezone.utc).hour
     if 2<=h<6: return 'DEAD'
     elif 6<=h<12: return 'ASIA'
     elif 12<=h<16: return 'LONDON'
@@ -51,9 +51,9 @@ def calc_pnl(direction, entry, exit_p, qty, symbol):
 
 def load_candles(db_path, symbol):
     conn=sqlite3.connect(db_path)
-    rows=conn.execute("SELECT symbol,ts,open,high,low,close,volume,turnover FROM klines WHERE symbol=? AND interval='1' ORDER BY ts ASC",(symbol,)).fetchall()
+    rows=conn.execute("SELECT symbol,ts,open,high,low,close,volume,turnover FROM klines WHERE symbol=? ORDER BY ts ASC",(symbol,)).fetchall()
     conn.close()
-    return [Candle(*r) for r in rows]
+    return [Candle(r[0], r[1]/1000, r[2], r[3], r[4], r[5], r[6], r[7]) for r in rows]
 
 class AveragesAnalyzer:
     def __init__(self):
@@ -71,7 +71,7 @@ class AveragesAnalyzer:
         cl=list(self._closes)
         if len(cl)<300: return 0.0
         ms=sum(cl[-60:])/60; ml=sum(cl[-300:])/300
-        return min(abs((ms-ml)/ml*100)/0.2,1.0)
+        return min(abs((ms-ml)/ml*100)/0.05,1.0)
 
 class MTFAnalyzer:
     def __init__(self):
@@ -150,12 +150,12 @@ class CandleBacktest:
         trend=self.avg.get_trend(); score=self.avg.get_score(); atr=self.atr.get_atr()
         if trend in('UP','DOWN'):
             d='long' if trend=='UP' else 'short'
-            if score*0.8>=THRESHOLDS['all_three'] and not self.mtf.is_blocked(d,'all_three'):
+            if s in('LONDON','NY') and score*0.8>=THRESHOLDS['all_three'] and not self.mtf.is_blocked(d,'all_three'):
                 self._open(c,d,'all_three',atr); return
             if s in('LONDON','NY') and score*0.7>=THRESHOLDS['averages_vector'] and not self.mtf.is_blocked(d,'averages_vector'):
                 self._open(c,d,'averages_vector',atr); return
             mr='short' if trend=='UP' else 'long'
-            if s in('ASIA','LONDON','NY') and score*0.6>=THRESHOLDS['averages_depth'] and not self.mtf.is_blocked(mr,'averages_depth'):
+            if s in('LONDON','NY') and score*0.6>=THRESHOLDS['averages_depth'] and not self.mtf.is_blocked(mr,'averages_depth'):
                 self._open(c,mr,'averages_depth',atr); return
 
     def _open(self,c,direction,scenario,atr):

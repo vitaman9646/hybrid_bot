@@ -99,11 +99,24 @@ def fetch_trades(
             break
 
         # Rate limit
-        time.sleep(0.03)
+        time.sleep(0.01)
 
     saver.flush()
     logger.info("%s: done, total=%d trades", symbol, total)
     return total
+
+
+def _fetch_one(args_tuple):
+    symbol, ex_cfg, db_path, sym_ts_from, ts_to = args_tuple
+    _client = HTTP(
+        testnet=ex_cfg.get('testnet', True),
+        api_key=ex_cfg.get('api_key', ''),
+        api_secret=ex_cfg.get('api_secret', ''),
+    )
+    _saver = MarketSaver(db_path)
+    n = fetch_trades(_client, symbol, sym_ts_from, ts_to, _saver)
+    _saver.close()
+    return symbol, n
 
 
 def main():
@@ -151,32 +164,38 @@ def main():
 
     # Получаем последние ts per-symbol для инкрементальной скачки
     import sqlite3 as _sqlite3
-    symbol_ts_to = {}
+    symbol_ts_from = {}
     try:
         _conn = _sqlite3.connect(args.db)
         _cur = _conn.cursor()
         for _sym in args.symbols:
-            _cur.execute("SELECT MIN(ts) FROM trades WHERE symbol=?", (_sym,))
+            _cur.execute("SELECT MAX(ts) FROM trades WHERE symbol=?", (_sym,))
             _row = _cur.fetchone()
             if _row and _row[0]:
-                _min_ts = float(_row[0])
-                if _min_ts > ts_from:
-                    symbol_ts_to[_sym] = _min_ts - 0.001
-                    logger.info("Incremental %s: fetching before %s",
-                                _sym, time.strftime('%Y-%m-%d %H:%M', time.gmtime(_min_ts)))
+                _last_ts = float(_row[0])
+                if _last_ts > ts_from:
+                    symbol_ts_from[_sym] = _last_ts + 0.001
+                    logger.info("Incremental %s: starting from %s",
+                                _sym, time.strftime('%Y-%m-%d %H:%M', time.gmtime(_last_ts)))
         _conn.close()
     except Exception as _e:
         logger.warning("Incremental check failed: %s", _e)
 
+    from multiprocessing import Pool
+
+    fetch_args = [(sym, ex_cfg, args.db, symbol_ts_from.get(sym, ts_from), ts_to) for sym in args.symbols]
+
+    workers = min(len(args.symbols), 4)
+    logger.info("Fetching %d symbols with %d workers", len(args.symbols), workers)
+
+    with Pool(workers) as pool:
+        results = pool.map(_fetch_one, fetch_args)
+
     total_all = 0
-    for symbol in args.symbols:
-        sym_ts_to = symbol_ts_to.get(symbol, ts_to)
-        sym_ts_from = ts_from
-        n = fetch_trades(client, symbol, sym_ts_from, sym_ts_to, saver)
+    for symbol, n in results:
         total_all += n
         logger.info("=== %s: %d trades loaded ===", symbol, n)
 
-    saver.close()
     logger.info("=== DONE: %d total trades for %s ===", total_all, args.symbols)
 
     # Показываем что в БД
