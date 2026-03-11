@@ -62,3 +62,30 @@ strategy:
       min_quote_volume: 500
       min_spread_size: 0.005
       min_trades_per_frame: 1
+
+  depth_shot_v2:
+    wall_min_age_s: 5.0
+    wall_max_drop_pct: 0.35
+    min_distance_pct: 0.15
+    max_distance_pct: 2.0
+    max_walls: 3
+    cluster_pct: 0.05
+    tp_pct_fallback: 0.3
+    ladder_distribution: [0.40, 0.35, 0.25]
+    symbol_thresholds:
+      BTCUSDT: 150000
+      ETHUSDT: 80000
+      SOLUSDT: 40000
+      BNBUSDT: 40000
+      XRPUSDT: 20000
+      DOGEUSDT: 20000
+      ADAUSDT: 20000
+      AVAXUSDT: 20000
+
+  momentum_fade:
+    window_s: 8.0
+    fade_threshold: 0.25
+    min_profit_pct: 0.10
+    confirm_s: 3.0
+    min_ticks: 10
+    max_loss_pct: 0.05
