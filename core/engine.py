@@ -474,7 +474,7 @@ class HybridEngine:
                         last_price = current_price
 
                         # Ранний выход если цена сильно против нас
-                        if max_adverse_pct > 0.03:
+                        if max_adverse_pct > 0.05:
                             logger.debug(
                                 "EntryConfirmation REJECTED [%s]: adverse %.4f%%",
                                 symbol, max_adverse_pct
@@ -484,7 +484,7 @@ class HybridEngine:
                 pass
 
         # Итог
-        confirmed = favorable_ticks >= 3 and max_adverse_pct <= 0.03
+        confirmed = favorable_ticks >= 2 and max_adverse_pct <= 0.05
         logger.debug(
             "EntryConfirmation [%s]: favorable=%d adverse=%.4f%% → %s",
             symbol, favorable_ticks, max_adverse_pct,

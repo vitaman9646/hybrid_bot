@@ -151,27 +151,28 @@ def main():
 
     # Получаем последние ts per-symbol для инкрементальной скачки
     import sqlite3 as _sqlite3
-    symbol_ts_from = {}
+    symbol_ts_to = {}
     try:
         _conn = _sqlite3.connect(args.db)
         _cur = _conn.cursor()
         for _sym in args.symbols:
-            _cur.execute("SELECT MAX(ts) FROM trades WHERE symbol=?", (_sym,))
+            _cur.execute("SELECT MIN(ts) FROM trades WHERE symbol=?", (_sym,))
             _row = _cur.fetchone()
             if _row and _row[0]:
-                _last_ts = float(_row[0])
-                if _last_ts > ts_from:
-                    symbol_ts_from[_sym] = _last_ts + 0.001
-                    logger.info("Incremental %s: starting from %s",
-                                _sym, time.strftime('%Y-%m-%d %H:%M', time.gmtime(_last_ts)))
+                _min_ts = float(_row[0])
+                if _min_ts > ts_from:
+                    symbol_ts_to[_sym] = _min_ts - 0.001
+                    logger.info("Incremental %s: fetching before %s",
+                                _sym, time.strftime('%Y-%m-%d %H:%M', time.gmtime(_min_ts)))
         _conn.close()
     except Exception as _e:
         logger.warning("Incremental check failed: %s", _e)
 
     total_all = 0
     for symbol in args.symbols:
-        sym_ts_from = symbol_ts_from.get(symbol, ts_from)
-        n = fetch_trades(client, symbol, sym_ts_from, ts_to, saver)
+        sym_ts_to = symbol_ts_to.get(symbol, ts_to)
+        sym_ts_from = ts_from
+        n = fetch_trades(client, symbol, sym_ts_from, sym_ts_to, saver)
         total_all += n
         logger.info("=== %s: %d trades loaded ===", symbol, n)
 
