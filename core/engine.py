@@ -160,6 +160,14 @@ class HybridEngine:
         self.score_decay = ScoreDecay()
         self.regime_filter = RegimeFilter()
 
+        # Сессия 4: DepthShotV2, RealisticTPLadder, MomentumFadeExit
+        from analyzers.depth_shot_v2 import DepthShotV2
+        from core.momentum_fade import MomentumFadeExit
+        depth_cfg = self.config.get('depth_shot_v2', {})
+        self.depth_v2 = DepthShotV2(depth_cfg, self.orderbook_manager)
+        fade_cfg = self.config.get('momentum_fade', {})
+        self.momentum_fade = MomentumFadeExit(fade_cfg)
+
         # MTFDirectionFilter
         symbols = self.config.get('pairs', {}).get('symbols', [])
         self.mtf_filter = MTFDirectionFilter(
@@ -373,6 +381,29 @@ class HybridEngine:
                 self.position_manager.update_price(trade.symbol, trade.price),
                 self._loop,
             )
+
+        # MomentumFadeExit: обновляем тики и проверяем угасание
+        self.momentum_fade.update(trade.symbol, trade.price, trade.timestamp)
+        self.depth_v2._tracker.update(
+            trade.symbol,
+            'bid' if trade.side == 'Buy' else 'ask',
+            trade.price,
+            trade.qty * trade.price,
+        )
+        if self.position_manager.has_position(trade.symbol) and self._loop:
+            pos = self.position_manager.get_position(trade.symbol)
+            if pos:
+                from models.signals import Direction
+                direction = Direction.LONG if pos.direction == 'long' else Direction.SHORT
+                if self.momentum_fade.should_exit(
+                    trade.symbol, direction, pos.entry_price, trade.price
+                ):
+                    asyncio.run_coroutine_threadsafe(
+                        self.position_manager.close_position(
+                            trade.symbol, reason='momentum_fade'
+                        ),
+                        self._loop,
+                    )
 
         # LoopMonitor: замер времени обработки тика
         _loop_ms = (time.time() - _loop_start) * 1000
