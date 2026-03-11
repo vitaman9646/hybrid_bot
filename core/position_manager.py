@@ -13,6 +13,7 @@ from core.volatility_tracker import VolatilityTracker
 
 if TYPE_CHECKING:
     from analyzers.signal_aggregator import AggregatedSignal
+    from core.tp_ladder import RealisticTPLadder
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ class Position:
     realized_pnl: float = 0.0
     close_price: float = 0.0
     close_reason: str = ""
+
+    # RealisticTPLadder (сессия 4)
+    tp_ladder: object = None  # RealisticTPLadder | None
 
     # MFE/MAE tracking (v4)
     mfe_pct: float = 0.0   # Max Favorable Excursion — макс движение в нашу сторону
@@ -240,11 +244,31 @@ class PositionManager:
             peak_price=entry,
             trailing_stop_price=sl,
             scenario=getattr(signal, "scenario", "").value if hasattr(getattr(signal, "scenario", ""), "value") else getattr(signal, "scenario", ""),
-            # v3: Partial TP — первый уровень на середине до TP
-            partial_tp_enabled=True,
-            partial_tp_price=(entry + tp) / 2 if direction == 'long' else (entry + tp) / 2,
+            # v3: Partial TP — оставляем для совместимости (перекрывается TPLadder)
+            partial_tp_enabled=False,
+            partial_tp_price=0.0,
             partial_tp_fraction=0.5,
         )
+
+        # v4: RealisticTPLadder
+        try:
+            from core.tp_ladder import RealisticTPLadder
+            from models.signals import Direction as Dir
+            dir_enum = Dir.LONG if direction == 'long' else Dir.SHORT
+            if hasattr(self, '_depth_v2') and self._depth_v2 is not None:
+                pos.tp_ladder = RealisticTPLadder.from_depth(
+                    self._depth_v2, symbol, dir_enum, entry
+                )
+            else:
+                pos.tp_ladder = RealisticTPLadder.fixed(
+                    symbol, dir_enum, entry,
+                    tp_pcts=[0.3, 0.6, 1.0],
+                    fractions=[0.40, 0.35, 0.25],
+                )
+            logger.info("[%s] TPLadder initialized: %d levels", symbol, len(pos.tp_ladder.levels))
+        except Exception as e:
+            logger.warning("[%s] TPLadder init failed: %s", symbol, e)
+            pos.tp_ladder = None
 
         self._positions[symbol] = pos
 
@@ -297,7 +321,8 @@ class PositionManager:
             if price < pos.peak_price:
                 pos.peak_price = price
 
-        # MFE/MAE tracking (v4)
+
+    # MFE/MAE tracking (v4)
         if pos.entry_price > 0:
             if pos.direction == 'long':
                 favorable_pct = (price - pos.entry_price) / pos.entry_price * 100
@@ -312,19 +337,21 @@ class PositionManager:
         if pos.trailing_enabled:
             await self._update_trailing(pos, price)
 
-        # v3: Partial TP
-        if pos.partial_tp_enabled and not pos.partial_tp_done and pos.partial_tp_price > 0:
-            hit = (pos.direction == 'long' and price >= pos.partial_tp_price) or                   (pos.direction == 'short' and price <= pos.partial_tp_price)
-            if hit:
-                partial_qty = round(pos.qty * pos.partial_tp_fraction, 8)
+        # v4: RealisticTPLadder (заменяет примитивный partial_tp)
+        if pos.tp_ladder is not None:
+            hits = pos.tp_ladder.get_hits(price)
+            for level in hits:
+                partial_qty = round(pos.qty * level.fraction, 8)
+                if partial_qty <= 0:
+                    pos.tp_ladder.mark_done(level, price)
+                    continue
                 logger.info(
-                    "[%s] Partial TP hit at %.4f — closing %.4f (%.0f%% of position)",
-                    symbol, price, partial_qty, pos.partial_tp_fraction * 100
+                    "[%s] TPLadder hit %s at %.4f — closing %.4f (%.0f%%)",
+                    symbol, level.label, price, partial_qty, level.fraction * 100
                 )
                 close_fn = getattr(self._executor, 'close_position', None)
-                if close_fn is None:
-                    ok = False
-                else:
+                ok = False
+                if close_fn is not None:
                     import asyncio
                     if asyncio.iscoroutinefunction(close_fn):
                         ok = await close_fn(symbol=symbol, qty=partial_qty,
@@ -334,16 +361,17 @@ class PositionManager:
                                      side='sell' if pos.direction == 'long' else 'buy')
                 if ok:
                     pos.qty -= partial_qty
-                    pos.partial_tp_done = True
-                    # Переносим SL на breakeven
-                    be_price = pos.entry_price * 1.001 if pos.direction == 'long' else pos.entry_price * 0.999
-                    if pos.direction == 'long' and be_price > pos.trailing_stop_price:
-                        pos.trailing_stop_price = be_price
-                        pos._breakeven_set = True
-                    elif pos.direction == 'short' and be_price < pos.trailing_stop_price:
-                        pos.trailing_stop_price = be_price
-                        pos._breakeven_set = True
-                    logger.info("[%s] SL moved to breakeven %.4f after partial TP", symbol, be_price)
+                    pos.tp_ladder.mark_done(level, price)
+                    # Переносим SL на breakeven после первого уровня
+                    if pos.tp_ladder.should_move_to_breakeven():
+                        be_price = pos.tp_ladder.breakeven_price()
+                        if pos.direction == 'long' and be_price > pos.trailing_stop_price:
+                            pos.trailing_stop_price = be_price
+                            pos._breakeven_set = True
+                        elif pos.direction == 'short' and be_price < pos.trailing_stop_price:
+                            pos.trailing_stop_price = be_price
+                            pos._breakeven_set = True
+                    logger.info("[%s] SL moved to breakeven %.4f after TPLadder", symbol, be_price)
 
         # Проверяем max drawdown (hard stop независимо от SL ордера)
         drawdown = self._calc_drawdown_pct(pos, price)

@@ -214,6 +214,7 @@ class HybridEngine:
         self.position_manager._circuit_breaker = self.circuit_breaker
         self.position_manager._alerts = self.alerts
         self.position_manager._aggregator = self.aggregator
+        self.position_manager._depth_v2 = self.depth_v2
         self.data_health._alerts = self.alerts
 
         # 12. Telegram Commands
