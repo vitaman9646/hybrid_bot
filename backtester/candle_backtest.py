@@ -16,7 +16,7 @@ SL_PCT = 0.012
 SIZE_USDT = 50.0
 RISK_PCT = 0.015  # 1.5% risk per trade
 
-# Per-symbol SL/TP overrides (base)
+# Per-symbol SL/TP overrides (optimized)
 SYMBOL_PARAMS = {
     'BTCUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
     'ETHUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
@@ -84,25 +84,6 @@ class AveragesAnalyzer:
         ms=sum(cl[-60:])/60; ml=sum(cl[-300:])/300
         return min(abs((ms-ml)/ml*100)/0.05,1.0)
 
-class H4TrendFilter:
-    def __init__(self):
-        self._buf = []
-        self._h4 = deque(maxlen=60)
-
-    def update(self, close):
-        self._buf.append(close)
-        if len(self._buf) >= 60:  # 1h свечи
-            self._h4.append(self._buf[-1])
-            self._buf = []
-
-    def get_bias(self):
-        h4 = list(self._h4)
-        if len(h4) < 20: return 'NEUTRAL'
-        e20 = ema(h4, 20); e50 = ema(h4, 50)
-        if e20 > e50 * 1.001: return 'LONG'
-        if e20 < e50 * 0.999: return 'SHORT'
-        return 'NEUTRAL'
-
 class MTFAnalyzer:
     def __init__(self):
         self._c15=deque(maxlen=30); self._c1h=deque(maxlen=30)
@@ -146,7 +127,7 @@ class ATRCalc:
 class CandleBacktest:
     def __init__(self,symbol,candles,equity=500.0):
         self.symbol=symbol; self.candles=candles; self.equity=equity; self.initial_equity=equity
-        self.avg=AveragesAnalyzer(); self.mtf=MTFAnalyzer(); self.atr=ATRCalc(); self.h4=H4TrendFilter()
+        self.avg=AveragesAnalyzer(); self.mtf=MTFAnalyzer(); self.atr=ATRCalc()
         self.trades=[]; self.open_trade=None; self._last_ts=0.0
 
     def run(self):
@@ -177,12 +158,10 @@ class CandleBacktest:
     def _check_entry(self,c):
         s=get_session(c.ts)
         if s=='DEAD' or c.ts-self._last_ts<60: return
-        self.h4.update(c.close)
         trend=self.avg.get_trend(); score=self.avg.get_score(); atr=self.atr.get_atr()
-        h4_bias=self.h4.get_bias()
         if trend in('UP','DOWN'):
             d='long' if trend=='UP' else 'short'
-            if s in('LONDON','NY') and score*0.8>=THRESHOLDS['all_three'] and not self.mtf.is_blocked(d,'all_three') and (h4_bias==d.upper() or h4_bias=='NEUTRAL'):
+            if s in('LONDON','NY') and score*0.8>=THRESHOLDS['all_three'] and not self.mtf.is_blocked(d,'all_three'):
                 self._open(c,d,'all_three',atr); return
             if s in('LONDON','NY') and score*0.7>=THRESHOLDS['averages_vector'] and not self.mtf.is_blocked(d,'averages_vector'):
                 self._open(c,d,'averages_vector',atr); return
