@@ -263,8 +263,8 @@ class PositionManager:
             else:
                 pos.tp_ladder = RealisticTPLadder.fixed(
                     symbol, dir_enum, entry,
-                    tp_pcts=[0.3, 0.6, 1.0],
-                    fractions=[0.40, 0.35, 0.25],
+                    tp_pcts=[0.8, 1.2, 1.8],
+                    fractions=[0.50, 0.30, 0.20],
                 )
             logger.info("[%s] TPLadder initialized: %d levels", symbol, len(pos.tp_ladder.levels))
         except Exception as e:
