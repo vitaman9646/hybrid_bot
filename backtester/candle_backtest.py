@@ -42,8 +42,7 @@ def get_session(ts):
     h = datetime.fromtimestamp(ts if ts < 1e10 else ts/1000, tz=timezone.utc).hour
     if 2<=h<6: return 'DEAD'
     elif 6<=h<12: return 'ASIA'
-    elif 8<=h<13: return 'LONDON'  # 08:00-12:59 UTC
-    elif 16<=h<21: return 'NY'
+    elif 8<=h<13: return 'LONDON'
     else: return 'QUIET'
 
 def ema(prices, period):
