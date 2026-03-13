@@ -18,16 +18,14 @@ RISK_PCT = 0.015  # 1.5% risk per trade
 
 # Per-symbol SL/TP overrides (optimized)
 SYMBOL_PARAMS = {
-    'BTCUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
-    'ETHUSDT':  {'sl': 0.010, 'tp1_mult': 1.20, 'tp2_mult': 2.40},
-    'SOLUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
-    'BNBUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
-    'XRPUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
-    'DOGEUSDT': {'sl': 0.0132, 'tp1_mult': 1.20, 'tp2_mult': 2.40},
-    'AVAXUSDT': {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 2.5},
+    'ETHUSDT':  {'sl': 0.010, 'tp1_mult': 1.2, 'tp2_mult': 2.4},
+    'SOLUSDT':  {'sl': 0.012, 'tp1_mult': 1.8, 'tp2_mult': 3.0},
+    'BNBUSDT':  {'sl': 0.015, 'tp1_mult': 1.0, 'tp2_mult': 2.0},
+    'DOGEUSDT': {'sl': 0.010, 'tp1_mult': 1.2, 'tp2_mult': 2.4},
+    'AVAXUSDT': {'sl': 0.012, 'tp1_mult': 1.2, 'tp2_mult': 2.4},
 }
-PHASE1 = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','AVAXUSDT','DOGEUSDT']
-DB_MAP = {'BTCUSDT':'klines_btc.db','ETHUSDT':'klines_eth.db','SOLUSDT':'klines_sol_bnb.db','BNBUSDT':'klines_sol_bnb.db','XRPUSDT':'klines_rest.db','DOGEUSDT':'klines_rest.db','ADAUSDT':'klines_rest.db','AVAXUSDT':'klines_rest.db','LINKUSDT':'klines_new_coins.db','LTCUSDT':'klines_new_coins.db','ARBUSDT':'klines_new_coins.db','SUIUSDT':'klines_new_coins.db','NEARUSDT':'klines_new_coins.db','OPUSDT':'klines_new_coins.db'}
+PHASE1 = ['ETHUSDT','SOLUSDT','BNBUSDT','DOGEUSDT','AVAXUSDT']
+DB_MAP = {s:'klines_60d.db' for s in ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','DOGEUSDT','AVAXUSDT']}
 
 @dataclass
 class Candle:
@@ -151,7 +149,7 @@ class CandleBacktest:
             if c.low<=t.tp1_price: self._close(t.tp1_price,c.ts,'tp1'); return
             fav=(t.entry_price-c.low)/t.entry_price*100; adv=(c.high-t.entry_price)/t.entry_price*100
         t.mfe_pct=max(t.mfe_pct,fav); t.mae_pct=max(t.mae_pct,adv)
-        limit={'averages_depth':1200,'averages_vector':1200}.get(t.scenario,1800)
+        limit={'averages_depth':21600,'averages_vector':21600}.get(t.scenario,21600)
         if c.ts-t.entry_ts>limit: self._close(c.close,c.ts,'time_stop')
 
     def _check_entry(self,c):
@@ -171,9 +169,9 @@ class CandleBacktest:
     def _open(self,c,direction,scenario,atr):
         p=c.close
         sp=SYMBOL_PARAMS.get(self.symbol,{'sl':SL_PCT,'tp1_mult':1.5,'tp2_mult':2.5})
-        sl_pct=max(sp['sl'],atr*2.5/p if atr>0 else sp['sl'])
-        tp1_pct=max(sl_pct*sp['tp1_mult'],atr*1.5/p if atr>0 else sl_pct*sp['tp1_mult'])
-        tp2_pct=max(sl_pct*sp['tp2_mult'],atr*2.5/p if atr>0 else sl_pct*sp['tp2_mult'])
+        sl_pct=sp['sl']
+        tp1_pct=sl_pct*sp['tp1_mult']
+        tp2_pct=sl_pct*sp['tp2_mult']
         sl=p*(1-sl_pct) if direction=='long' else p*(1+sl_pct)
         tp1=p*(1+tp1_pct) if direction=='long' else p*(1-tp1_pct)
         tp2=p*(1+tp2_pct) if direction=='long' else p*(1-tp2_pct)
