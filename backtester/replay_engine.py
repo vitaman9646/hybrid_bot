@@ -221,10 +221,35 @@ class ReplayEngine:
 
             # Проверяем открытую позицию
             if open_pos:
-                bt_trade = self._check_exit(open_pos, trade)
-                if bt_trade:
-                    result.trades.append(bt_trade)
+                # Time-stop: 6 часов
+                if trade.timestamp - open_pos.entry_ts > 6 * 3600:
+                    pnl = self._calc_pnl(open_pos, trade.price)
+                    result.trades.append(BacktestTrade(
+                        symbol=open_pos.symbol,
+                        direction=open_pos.direction,
+                        entry_price=open_pos.entry_price,
+                        exit_price=trade.price,
+                        qty=open_pos.qty,
+                        pnl_usdt=pnl,
+                        pnl_pct=pnl / open_pos.size_usdt * 100,
+                        entry_ts=open_pos.entry_ts,
+                        exit_ts=trade.timestamp,
+                        exit_reason='time_stop',
+                        scenario=open_pos.scenario,
+                    ))
                     open_pos = None
+                else:
+                    bt_trade = self._check_exit(open_pos, trade)
+                    if bt_trade:
+                        result.trades.append(bt_trade)
+                        open_pos = None
+                continue
+
+            # Сессионный фильтр London 08-13 UTC (без 09 и 12)
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(trade.timestamp, tz=timezone.utc)
+            h = dt.hour
+            if not (8 <= h < 13) or h in (9, 12):
                 continue
 
             # Ищем сигнал

@@ -19,12 +19,12 @@ RISK_PCT = 0.015  # 1.5% risk per trade
 # Per-symbol SL/TP overrides (optimized)
 SYMBOL_PARAMS = {
     'ETHUSDT':  {'sl': 0.010, 'tp1_mult': 1.2, 'tp2_mult': 2.4},
-    'SOLUSDT':  {'sl': 0.012, 'tp1_mult': 1.8, 'tp2_mult': 3.0},
+    'SOLUSDT':  {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 3.0},
     'BNBUSDT':  {'sl': 0.015, 'tp1_mult': 1.0, 'tp2_mult': 2.0},
-    'DOGEUSDT': {'sl': 0.010, 'tp1_mult': 1.2, 'tp2_mult': 2.4},
-    'AVAXUSDT': {'sl': 0.012, 'tp1_mult': 1.2, 'tp2_mult': 2.4},
+    'DOGEUSDT': {'sl': 0.012, 'tp1_mult': 1.2, 'tp2_mult': 2.4},
+    'AVAXUSDT': {'sl': 0.012, 'tp1_mult': 1.5, 'tp2_mult': 3.0},
 }
-PHASE1 = ['ETHUSDT','SOLUSDT','BNBUSDT','DOGEUSDT','AVAXUSDT']
+PHASE1 = ['SOLUSDT','DOGEUSDT','AVAXUSDT']
 DB_MAP = {s:'klines_60d.db' for s in ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','DOGEUSDT','AVAXUSDT']}
 
 @dataclass
@@ -39,8 +39,9 @@ class Trade:
 def get_session(ts):
     h = datetime.fromtimestamp(ts if ts < 1e10 else ts/1000, tz=timezone.utc).hour
     if 2<=h<6: return 'DEAD'
-    elif 6<=h<12: return 'ASIA'
+    elif h==9 or h==12: return 'DEAD'
     elif 8<=h<13: return 'LONDON'
+    elif 6<=h<8: return 'ASIA'
     else: return 'QUIET'
 
 def ema(prices, period):
