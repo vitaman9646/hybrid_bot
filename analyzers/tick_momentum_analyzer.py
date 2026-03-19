@@ -103,9 +103,10 @@ class TickMomentumAnalyzer:
             return None
 
         direction = 'long' if move > 0 else 'short'
-        # Dynamic sizing: strength = move/thresh, capped at 2x
         strength = min(abs(move) / params['thresh'], 2.0)
-        confidence = strength / 2.0  # 0.5–1.0 для логов
+        # Only_weak sizing: слабые сигналы прибыльнее сильных
+        size_mult = 2.0 if strength < 1.3 else 0.5
+        confidence = strength / 2.0
 
         self._last_signal[symbol] = now
 
@@ -123,5 +124,5 @@ class TickMomentumAnalyzer:
             sl_pct=params['sl'],
             tp_mult=params['tp'],
             confidence=confidence,
-            size_mult=min(strength, 2.0),
+            size_mult=size_mult,
         )
