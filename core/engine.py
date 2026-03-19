@@ -369,6 +369,8 @@ class HybridEngine:
         tp1 = entry * (1 + signal.sl_pct * signal.tp_mult) if signal.direction == 'long' else entry * (1 - signal.sl_pct * signal.tp_mult)
 
         size = self.risk_manager.calculate_size(symbol, entry, sl)
+        if size and hasattr(signal, 'size_mult'):
+            size = size * signal.size_mult
         if size is None or size <= 0:
             logger.debug("TickMomentum: RiskManager rejected %s", symbol)
             return

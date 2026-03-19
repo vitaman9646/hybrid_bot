@@ -35,6 +35,7 @@ class TickMomentumSignal:
     sl_pct: float
     tp_mult: float
     confidence: float
+    size_mult: float = 1.0
 
 
 class TickMomentumAnalyzer:
@@ -102,7 +103,9 @@ class TickMomentumAnalyzer:
             return None
 
         direction = 'long' if move > 0 else 'short'
-        confidence = min(abs(move) / params['thresh'], 2.0) / 2.0  # 0.5–1.0
+        # Dynamic sizing: strength = move/thresh, capped at 2x
+        strength = min(abs(move) / params['thresh'], 2.0)
+        confidence = strength / 2.0  # 0.5–1.0 для логов
 
         self._last_signal[symbol] = now
 
@@ -120,4 +123,5 @@ class TickMomentumAnalyzer:
             sl_pct=params['sl'],
             tp_mult=params['tp'],
             confidence=confidence,
+            size_mult=min(strength, 2.0),
         )
