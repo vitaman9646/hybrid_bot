@@ -26,6 +26,7 @@ from analyzers.vector_analyzer import VectorAnalyzer
 from analyzers.averages_analyzer import AveragesAnalyzer
 from analyzers.depth_shot_analyzer import DepthShotAnalyzer
 from analyzers.signal_aggregator import SignalAggregator
+from analyzers.tick_momentum_analyzer import TickMomentumAnalyzer
 from core.filter_pipeline import FilterPipeline
 from monitoring.telegram_commands import TelegramCommands
 from monitoring.health_server import HealthServer
@@ -165,6 +166,7 @@ class HybridEngine:
         from core.momentum_fade import MomentumFadeExit
         depth_cfg = self.config.get('depth_shot_v2', {})
         self.depth_v2 = DepthShotV2(depth_cfg, self.orderbook_manager)
+        self.tick_momentum = TickMomentumAnalyzer()
         fade_cfg = self.config.get('momentum_fade', {})
         self.momentum_fade = MomentumFadeExit(fade_cfg)
 
@@ -347,6 +349,46 @@ class HybridEngine:
         finally:
             await self._cleanup()
 
+    async def _open_tick_momentum(self, signal):
+        """Открываем позицию по tick momentum сигналу."""
+        from core.session_filter import SessionFilter
+        symbol = signal.symbol
+
+        # Проверяем сессию
+        session = self.session_filter.get_session(time.time())
+        if session not in ('LONDON', 'NY'):
+            return
+
+        # Проверяем позицию
+        if self.position_manager.has_position(symbol):
+            return
+
+        # RiskManager
+        entry = signal.entry_price
+        sl = entry * (1 - signal.sl_pct) if signal.direction == 'long' else entry * (1 + signal.sl_pct)
+        tp1 = entry * (1 + signal.sl_pct * signal.tp_mult) if signal.direction == 'long' else entry * (1 - signal.sl_pct * signal.tp_mult)
+
+        size = self.risk_manager.calculate_size(symbol, entry, sl)
+        if size is None or size <= 0:
+            logger.debug("TickMomentum: RiskManager rejected %s", symbol)
+            return
+
+        logger.info(
+            "TickMomentum OPEN: %s %s entry=%.4f sl=%.4f tp=%.4f size=%.4f conf=%.2f",
+            symbol, signal.direction, entry, sl, tp1, size, signal.confidence
+        )
+
+        await self.position_manager.open_position(
+            symbol=symbol,
+            direction=signal.direction,
+            entry_price=entry,
+            sl_price=sl,
+            tp1_price=tp1,
+            tp2_price=tp1,  # одна цель
+            size=size,
+            scenario='tick_momentum',
+        )
+
     def _on_trade(self, trade: TradeData):
         """
         Callback для каждого трейда.
@@ -396,6 +438,17 @@ class HybridEngine:
             side=trade.side,
             ts=trade.timestamp,
         )
+
+        # TickMomentumAnalyzer
+        if not self.position_manager.has_position(trade.symbol):
+            tm_signal = self.tick_momentum.on_trade(
+                trade.symbol, trade.price, trade.qty, trade.side
+            )
+            if tm_signal and self._loop:
+                asyncio.run_coroutine_threadsafe(
+                    self._open_tick_momentum(tm_signal),
+                    self._loop,
+                )
 
         # Передаём в агрегатор
         pos_dir = self.position_manager.get_direction(trade.symbol)
