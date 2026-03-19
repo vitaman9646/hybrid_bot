@@ -380,15 +380,15 @@ class HybridEngine:
             symbol, signal.direction, entry, sl, tp1, size, signal.confidence
         )
 
-        # Pyramid: если уже есть прибыльная позиция — добавляем 50%
+        # Pyramid: если уже есть прибыльная позиция — пропускаем (pyramid через position_manager)
         existing = self.position_manager.get_position(symbol)
         if existing:
             unrealized = (entry - existing.entry_price) / existing.entry_price
             if signal.direction == 'short':
                 unrealized = (existing.entry_price - entry) / existing.entry_price
-            if unrealized > 0.008:  # +0.8% — добавляем к позиции
-                size = size * 0.5
-                logger.info("TickMomentum PYRAMID: %s +50%% at pnl=%.2f%%", symbol, unrealized*100)
+            if unrealized > 0.008:
+                logger.info("TickMomentum PYRAMID skip: %s already in position pnl=%.2f%%", symbol, unrealized*100)
+            return  # не открываем вторую позицию
 
         await self.position_manager.open_position(
             symbol=symbol,
