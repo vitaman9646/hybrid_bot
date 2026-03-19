@@ -40,6 +40,12 @@ class OrderExecutor:
         )
         self._latency_guard = latency_guard
         
+        # Paper trading mode
+        self._paper_mode = config.get('paper_mode', False)
+        if self._paper_mode:
+            logger.info('[PAPER] Paper trading mode ON — ордера не отправляются на биржу')
+        self._paper_balance = 1000.0
+
         # Retry
         self._max_retries = config.get('max_retries', 3)
         self._retry_delay = config.get('retry_delay', 0.1)
@@ -69,6 +75,15 @@ class OrderExecutor:
         """
         Выставить ордер с retry, rate limiting и latency tracking.
         """
+        # PAPER TRADING MODE
+        if getattr(self, '_paper_mode', False):
+            import uuid
+            fake_price = price or 0.0
+            fake_qty = qty or (qty_usdt / fake_price if qty_usdt and fake_price else 0.0)
+            order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
+            logger.info(f"[PAPER] {side} {symbol} qty={fake_qty:.4f} price={fake_price} type={order_type} id={order_id}")
+            return {'orderId': order_id, 'symbol': symbol, 'side': side, 'price': str(fake_price), 'qty': str(fake_qty), 'orderStatus': 'Filled', 'paper': True}
+
         # Проверяем latency guard
         if not reduce_only and not self._latency_guard.is_new_entries_allowed:
             logger.warning(
@@ -192,6 +207,11 @@ class OrderExecutor:
         qty: float,
     ) -> str:
         """Stop Loss — conditional order"""
+        if getattr(self, '_paper_mode', False):
+            import uuid
+            sl_id = f"PAPER-SL-{uuid.uuid4().hex[:8].upper()}"
+            logger.info(f"[PAPER] SL {side} {symbol} trigger={trigger_price} qty={qty} id={sl_id}")
+            return sl_id
         await self._rate_limiter.acquire()
         
         try:
@@ -490,6 +510,8 @@ class OrderExecutor:
       }
 
     async def get_balance(self) -> float:
+        if getattr(self, '_paper_mode', False):
+            return getattr(self, '_paper_balance', 1000.0)
         """Получить доступный баланс USDT."""
         try:
             from functools import partial
