@@ -840,7 +840,7 @@ class HybridEngine:
             atr_pct = vol_tracker.get_volatility() if vol_tracker else 0.0
             sl_dist = max(atr_pct * 2.5, self.risk_manager.cfg.sl_pct_default) if atr_pct else self.risk_manager.cfg.sl_pct_default
         except Exception as e:
-            logger.error('volatility_tracker ERROR [%s]: %s', signal.symbol, e, exc_info=True)
+            logger.warning('volatility_tracker ERROR [%s]: %s', signal.symbol, e)
             sl_dist = self.risk_manager.cfg.sl_pct_default
 
         logger.info("ENGINE STEP2.5: risk_manager check [%s] score=%s", signal.symbol, getattr(signal, "score", "MISSING"))
