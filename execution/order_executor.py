@@ -293,6 +293,9 @@ class OrderExecutor:
         """Отменить ордер"""
         if not order_id:
             return False
+        if getattr(self, '_paper_mode', False):
+            logger.info(f'[PAPER] Cancel {symbol} {order_id}')
+            return True
         
         await self._rate_limiter.acquire()
         

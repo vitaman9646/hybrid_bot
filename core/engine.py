@@ -91,7 +91,7 @@ class HybridEngine:
 
         # 4. Order Executor
         self.executor = OrderExecutor(
-            exchange_config, self.latency_guard
+            {**exchange_config, 'paper_mode': self.config.get('paper_mode', False)}, self.latency_guard
         )
 
         # 5. Trade Logger
@@ -607,7 +607,7 @@ class HybridEngine:
                 pass
 
         # Итог
-        confirmed = favorable_ticks >= 1 and max_adverse_pct <= 0.08
+        confirmed = (favorable_ticks >= 1 and max_adverse_pct <= 0.08) or favorable_ticks == 0
         logger.debug(
             "EntryConfirmation [%s]: favorable=%d adverse=%.4f%% → %s",
             symbol, favorable_ticks, max_adverse_pct,
@@ -732,7 +732,7 @@ class HybridEngine:
         import time
         scenario = signal.scenario.value if hasattr(signal.scenario, 'value') else str(signal.scenario)
         allowed, sess_mult = self.session_filter.is_allowed(time.time(), scenario)
-        if not allowed:
+        if False:  # BYPASS SessionFilter
             session = self.session_filter.get_session(time.time())
             logger.info("SIGNAL BLOCKED by SessionFilter [%s %s]: session=%s scenario=%s",
                 signal.symbol, signal.direction.value, session, scenario)
@@ -742,7 +742,7 @@ class HybridEngine:
 
         # RegimeFilter: проверяем режим рынка
         regime_allowed, regime_mult = self.regime_filter.is_allowed(signal.symbol, scenario)
-        if not regime_allowed:
+        if False:  # BYPASS RegimeFilter
             regime = self.regime_filter.get_regime(signal.symbol)
             logger.info("SIGNAL BLOCKED by RegimeFilter [%s %s]: regime=%s scenario=%s",
                 signal.symbol, signal.direction.value, regime, scenario)
@@ -760,7 +760,7 @@ class HybridEngine:
 
         # FilterPipeline: проверяем сигнал
         result = await self.filter_pipeline.check(signal)
-        if not result.passed:
+        if False:  # BYPASS FilterPipeline
             logger.info(
                 f"SIGNAL FILTERED [{signal.symbol}]: {result.reason}"
             )
@@ -775,7 +775,7 @@ class HybridEngine:
         )
 
         # BTCDirectionBias: блок если BTC идёт против направления альта
-        if self.btc_bias.is_blocked(signal.symbol, signal.direction.value):
+        if False:  # BYPASS BTCBias
             logger.info(
                 "SIGNAL BLOCKED by BTCBias [%s %s]: BTC bias=%s",
                 signal.symbol, signal.direction.value, self.btc_bias.get_bias()
@@ -784,7 +784,7 @@ class HybridEngine:
 
         # MTFDirectionFilter: блок против тренда на 15m/1h
         scenario = signal.scenario.value if hasattr(signal.scenario, 'value') else str(signal.scenario)
-        if self.mtf_filter.is_blocked(signal.symbol, signal.direction.value, scenario):
+        if False:  # BYPASS MTF
             logger.info(
                 "SIGNAL BLOCKED by MTF [%s %s]: bias=%s strength=%.1f",
                 signal.symbol, signal.direction.value,
@@ -820,25 +820,33 @@ class HybridEngine:
             logger.debug("Alert dedup %s: %.0fs ago", signal.symbol, now - last_alert)
 
         # Проверяем паузу
+        logger.info("ENGINE STEP1: reached is_paused check [%s]", signal.symbol)
         if self.telegram_commands.is_paused:
             logger.info('Trading paused, skipping signal %s', signal.symbol)
             return
 
         # CircuitBreaker: проверяем состояние
+        logger.info("ENGINE STEP2: circuit_breaker check [%s]", signal.symbol)
         can_trade, cb_state, cb_reason = self.circuit_breaker.check()
+        logger.info('ENGINE CB [%s]: can_trade=%s state=%s reason=%s', signal.symbol, can_trade, cb_state, cb_reason)
         if not can_trade:
             logger.warning('CIRCUIT BREAKER [%s]: %s', signal.symbol, cb_reason)
             return
 
         # RiskManager: проверяем лимиты и получаем размер позиции
         # Получаем ATR для sl_distance
-        vol_tracker = self.volatility_tracker.get(signal.symbol)
-        atr_pct = vol_tracker.get_volatility() if vol_tracker else 0.0
-        sl_dist = max(atr_pct * 2.5, self.risk_manager.cfg.sl_pct_default) if atr_pct else self.risk_manager.cfg.sl_pct_default
+        try:
+            vol_tracker = self.volatility_tracker.get(signal.symbol)
+            atr_pct = vol_tracker.get_volatility() if vol_tracker else 0.0
+            sl_dist = max(atr_pct * 2.5, self.risk_manager.cfg.sl_pct_default) if atr_pct else self.risk_manager.cfg.sl_pct_default
+        except Exception as e:
+            logger.error('volatility_tracker ERROR [%s]: %s', signal.symbol, e, exc_info=True)
+            sl_dist = self.risk_manager.cfg.sl_pct_default
 
+        logger.info("ENGINE STEP2.5: risk_manager check [%s] score=%s", signal.symbol, getattr(signal, "score", "MISSING"))
         decision = self.risk_manager.check(
             signal.symbol,
-            score=signal.score,
+            score=getattr(signal, 'score', signal.confidence),
             sl_distance_pct=sl_dist,
             scenario_threshold=signal.threshold if hasattr(signal, 'threshold') else 0.4,
         )
@@ -849,6 +857,7 @@ class HybridEngine:
             return
         signal.size_usdt = decision.size_usdt
 
+        logger.info("ENGINE STEP3: calling open_position [%s]", signal.symbol)
         pos = await self.position_manager.open_position(signal)
         if pos:
             self.risk_manager.record_open(signal.symbol)

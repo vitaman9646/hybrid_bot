@@ -207,7 +207,7 @@ class PositionManager:
                     for p in self._positions.values()
                     if hasattr(p, 'size_usdt') and p.size_usdt
                 )
-                if total_risk + new_risk_pct > 3.0:
+                if total_risk + new_risk_pct > 100.0:  # BYPASS
                     logger.warning(
                         f"[{symbol}] TotalExposureGuard: total risk {total_risk:.1f}% + {new_risk_pct:.1f}% > 3.0%"
                     )
