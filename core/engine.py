@@ -490,7 +490,7 @@ class HybridEngine:
                 ):
                     asyncio.run_coroutine_threadsafe(
                         self.position_manager.close_position(
-                            trade.symbol, reason='momentum_fade'
+                            trade.symbol, reason='momentum_fade', current_price=trade.price
                         ),
                         self._loop,
                     )
