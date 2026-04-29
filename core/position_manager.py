@@ -249,6 +249,7 @@ class PositionManager:
             partial_tp_enabled=False,
             partial_tp_price=0.0,
             partial_tp_fraction=0.5,
+            size_usdt=size_usdt,
         )
 
         # v4: RealisticTPLadder

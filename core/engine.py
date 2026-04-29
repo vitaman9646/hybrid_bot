@@ -836,8 +836,7 @@ class HybridEngine:
         # RiskManager: проверяем лимиты и получаем размер позиции
         # Получаем ATR для sl_distance
         try:
-            vol_tracker = self.volatility_tracker.get(signal.symbol)
-            atr_pct = vol_tracker.get_volatility() if vol_tracker else 0.0
+            atr_pct = self.volatility_tracker.get_volatility(signal.symbol)
             sl_dist = max(atr_pct * 2.5, self.risk_manager.cfg.sl_pct_default) if atr_pct else self.risk_manager.cfg.sl_pct_default
         except Exception as e:
             logger.warning('volatility_tracker ERROR [%s]: %s', signal.symbol, e)
