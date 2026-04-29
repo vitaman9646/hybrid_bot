@@ -195,10 +195,10 @@ class TelegramAlerts:
         pnl_pct = pnl_usdt / size_usdt * 100 if size_usdt > 0 else 0
         pnl_emoji = "✅" if pnl_usdt >= 0 else "❌"
         reason_emoji = {
-            'tp': '??', 'sl': '??️', 'time_stop': '⏱️',
+            'tp': '??', 'sl': '??', 'time_stop': '⏱️',
             'momentum_fade': '??', 'opposite_exit': '??',
             'max_drawdown': '⚠️', 'manual': '??️',
-        }.get(reason, '??')
+        }.get(reason, '❓')
 
         dur_str = f"{duration_sec//60}m {duration_sec%60}s" if duration_sec else "?"
         msg = (
