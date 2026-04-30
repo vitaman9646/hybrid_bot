@@ -447,6 +447,9 @@ class PositionManager:
         if close_result:
             pos.state = PositionState.CLOSED
 
+            pos.close_price = current_price or pos.entry_price
+            pos.realized_pnl = self._calc_pnl(pos)
+
             # Telegram: уведомление о закрытии
             if self._alerts is not None:
                 duration = int(time.time() - pos.timestamp)
@@ -454,16 +457,13 @@ class PositionManager:
                     symbol=pos.symbol,
                     direction=pos.direction,
                     entry_price=pos.entry_price,
-                    exit_price=current_price or pos.close_price or pos.tp_price,
+                    exit_price=pos.close_price,
                     qty=pos.qty,
                     size_usdt=pos.size_usdt,
                     pnl_usdt=pos.realized_pnl,
                     reason=reason,
                     duration_sec=duration,
                 ))
-            pos.close_price = current_price or pos.entry_price
-            pos.realized_pnl = self._calc_pnl(pos)
-
             logger.info(
                 f"[{symbol}] Position CLOSED: "
                 f"reason={reason} "
@@ -875,6 +875,11 @@ class PositionManager:
     def _calc_pnl(self, pos: Position) -> float:
         if pos.close_price <= 0 or pos.entry_price <= 0:
             return 0.0
+        notional = pos.qty * pos.entry_price
+        fee_rate = 0.00055  # Bybit taker 0.055% x2 sides
+        commission = notional * fee_rate * 2
         if pos.direction == 'long':
-            return (pos.close_price - pos.entry_price) / pos.entry_price * pos.qty * pos.entry_price
-        return (pos.entry_price - pos.close_price) / pos.entry_price * pos.qty * pos.entry_price
+            gross = (pos.close_price - pos.entry_price) / pos.entry_price * notional
+        else:
+            gross = (pos.entry_price - pos.close_price) / pos.entry_price * notional
+        return gross - commission

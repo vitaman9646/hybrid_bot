@@ -1,0 +1,362 @@
+"""
+Feature Logger — записывает полный snapshot каждого сигнала для ML/анализа.
+Thread-safe, async-compatible, zero impact на торговую логику.
+"""
+
+import sqlite3
+from datetime import datetime, timezone
+from typing import Dict, Optional, Any
+import logging
+from contextlib import contextmanager
+import uuid
+
+logger = logging.getLogger(__name__)
+
+
+class FeatureLogger:
+    """
+    Централизованный логгер фич сигналов.
+    
+    Workflow:
+    1. SignalAggregator генерирует сигнал → log_signal()
+    2. RiskManager принимает/отклоняет → update_decision()
+    3. PositionManager закрывает позицию → update_outcome()
+    """
+    
+    def __init__(self, db_path: str = "data/signal_features.db"):
+        self.db_path = db_path
+        self._init_db()
+        logger.info(f"FeatureLogger initialized: {db_path}")
+    
+    def _init_db(self):
+        """Создаёт таблицу при первом запуске."""
+        with self._get_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS signal_features (
+                    signal_id TEXT PRIMARY KEY,
+                    timestamp INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    
+                    -- Vector Analyzer
+                    vector_score REAL,
+                    vector_direction TEXT,
+                    vector_delta REAL,
+                    vector_cvd REAL,
+                    vector_sweep_detected INTEGER,
+                    vector_absorption_detected INTEGER,
+                    
+                    -- Averages Analyzer
+                    averages_score REAL,
+                    averages_direction TEXT,
+                    averages_slope REAL,
+                    averages_ema_cross INTEGER,
+                    averages_regime TEXT,
+                    
+                    -- DepthShot Analyzer
+                    depth_score REAL,
+                    depth_direction TEXT,
+                    depth_imbalance REAL,
+                    depth_bid_wall_size REAL,
+                    depth_ask_wall_size REAL,
+                    depth_iceberg_detected INTEGER,
+                    
+                    -- Aggregated signal
+                    scenario TEXT,
+                    final_strength REAL,
+                    final_direction TEXT,
+                    threshold_used REAL,
+                    
+                    -- TickMomentum
+                    tick_momentum_active INTEGER DEFAULT 0,
+                    tick_price_change_pct REAL,
+                    tick_continuation_pct REAL,
+                    tick_window_sec INTEGER,
+                    tick_strength REAL,
+                    
+                    -- Market context
+                    session TEXT,
+                    regime TEXT,
+                    btc_bias TEXT,
+                    
+                    -- Market microstructure
+                    spread_bps REAL,
+                    mid_price REAL,
+                    volume_ratio REAL,
+                    price_volatility_pct REAL,
+                    orderbook_depth_ratio REAL,
+                    
+                    -- Risk state
+                    open_positions_count INTEGER,
+                    same_symbol_position_exists INTEGER,
+                    session_pnl_pct REAL,
+                    daily_pnl_pct REAL,
+                    consecutive_losses INTEGER,
+                    consecutive_wins INTEGER,
+                    account_equity REAL,
+                    risk_multiplier REAL,
+                    
+                    -- Time features
+                    hour_utc INTEGER,
+                    day_of_week INTEGER,
+                    minutes_since_session_open INTEGER,
+                    
+                    -- Decision (RiskManager)
+                    was_traded INTEGER DEFAULT NULL,
+                    rejected_reason TEXT,
+                    planned_size_usd REAL,
+                    planned_sl_pct REAL,
+                    planned_tp_pct REAL,
+                    
+                    -- Outcome (PositionManager)
+                    entry_price REAL,
+                    exit_price REAL,
+                    actual_size_usd REAL,
+                    pnl_pct REAL,
+                    pnl_usd REAL,
+                    exit_reason TEXT,
+                    duration_sec INTEGER,
+                    max_adverse_excursion_pct REAL,
+                    max_favorable_excursion_pct REAL,
+                    slippage_entry_bps REAL,
+                    slippage_exit_bps REAL,
+                    
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sf_timestamp ON signal_features(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sf_symbol ON signal_features(symbol)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sf_scenario ON signal_features(scenario)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sf_was_traded ON signal_features(was_traded)")
+            
+            conn.commit()
+            logger.info("FeatureLogger DB initialized")
+    
+    @contextmanager
+    def _get_conn(self):
+        """Thread-safe connection context manager."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+    
+    def log_signal(
+        self,
+        symbol: str,
+        vector_signal: Optional[Any],
+        averages_signal: Optional[Any],
+        depth_signal: Optional[Any],
+        final_signal: Any,
+        session: str,
+        regime: str,
+        btc_bias: str,
+        tick_momentum_data: Optional[Dict] = None,
+        market_data: Optional[Dict] = None,
+        risk_state: Optional[Dict] = None,
+    ) -> str:
+        """Логирует новый сигнал со всеми фичами. Returns signal_id."""
+        
+        signal_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        
+        def safe_get(obj, attr, default=None):
+            if obj is None:
+                return default
+            if isinstance(obj, dict):
+                val = obj.get(attr, default)
+            else:
+                val = getattr(obj, attr, default)
+            # Конвертируем enum в строку
+            if hasattr(val, 'value'):
+                return val.value
+            return val
+        
+        market_data = market_data or {}
+        risk_state = risk_state or {}
+        tick_momentum_data = tick_momentum_data or {}
+        
+        features = {
+            'signal_id': signal_id,
+            'timestamp': int(now.timestamp()),
+            'symbol': symbol,
+            
+            'vector_score': safe_get(vector_signal, 'score'),
+            'vector_direction': safe_get(vector_signal, 'direction'),
+            'vector_delta': safe_get(vector_signal, 'delta'),
+            'vector_cvd': safe_get(vector_signal, 'cvd'),
+            'vector_sweep_detected': int(safe_get(vector_signal, 'sweep_detected', False)),
+            'vector_absorption_detected': int(safe_get(vector_signal, 'absorption_detected', False)),
+            
+            'averages_score': safe_get(averages_signal, 'score'),
+            'averages_direction': safe_get(averages_signal, 'direction'),
+            'averages_slope': safe_get(averages_signal, 'slope'),
+            'averages_ema_cross': int(safe_get(averages_signal, 'ema_cross', False)),
+            'averages_regime': safe_get(averages_signal, 'regime'),
+            
+            'depth_score': safe_get(depth_signal, 'score'),
+            'depth_direction': safe_get(depth_signal, 'direction'),
+            'depth_imbalance': safe_get(depth_signal, 'imbalance'),
+            'depth_bid_wall_size': safe_get(depth_signal, 'bid_wall_size'),
+            'depth_ask_wall_size': safe_get(depth_signal, 'ask_wall_size'),
+            'depth_iceberg_detected': int(safe_get(depth_signal, 'iceberg_detected', False)),
+            
+            'scenario': safe_get(final_signal, 'scenario').value if hasattr(safe_get(final_signal, 'scenario'), 'value') else str(safe_get(final_signal, 'scenario')),
+            'final_strength': safe_get(final_signal, 'strength'),
+            'final_direction': safe_get(final_signal, 'direction'),
+            'threshold_used': safe_get(final_signal, 'threshold'),
+            
+            'tick_momentum_active': int(bool(tick_momentum_data)),
+            'tick_price_change_pct': tick_momentum_data.get('price_change_pct'),
+            'tick_continuation_pct': tick_momentum_data.get('continuation_pct'),
+            'tick_window_sec': tick_momentum_data.get('window_sec'),
+            'tick_strength': tick_momentum_data.get('strength'),
+            
+            'session': session,
+            'regime': regime,
+            'btc_bias': btc_bias,
+            
+            'spread_bps': market_data.get('spread_bps'),
+            'mid_price': market_data.get('mid_price'),
+            'volume_ratio': market_data.get('volume_ratio'),
+            'price_volatility_pct': market_data.get('volatility_pct'),
+            'orderbook_depth_ratio': market_data.get('depth_ratio'),
+            
+            'open_positions_count': risk_state.get('open_positions', 0),
+            'same_symbol_position_exists': int(risk_state.get('same_symbol_exists', False)),
+            'session_pnl_pct': risk_state.get('session_pnl_pct'),
+            'daily_pnl_pct': risk_state.get('daily_pnl_pct'),
+            'consecutive_losses': risk_state.get('consecutive_losses', 0),
+            'consecutive_wins': risk_state.get('consecutive_wins', 0),
+            'account_equity': risk_state.get('equity'),
+            'risk_multiplier': risk_state.get('risk_multiplier', 1.0),
+            
+            'hour_utc': now.hour,
+            'day_of_week': now.weekday(),
+            'minutes_since_session_open': market_data.get('minutes_since_session_open', 0),
+            
+            'created_at': now.isoformat(),
+            'updated_at': now.isoformat(),
+        }
+        
+        try:
+            with self._get_conn() as conn:
+                columns = ', '.join(features.keys())
+                placeholders = ', '.join(['?' for _ in features])
+                conn.execute(
+                    f"INSERT INTO signal_features ({columns}) VALUES ({placeholders})",
+                    tuple(features.values())
+                )
+                conn.commit()
+            
+            logger.info(f"?? Signal logged: {signal_id[:8]} | {symbol} | {safe_get(final_signal, 'scenario')} | str={safe_get(final_signal, 'strength', 0):.2f}")
+        
+        except Exception as e:
+            logger.error(f"Failed to log signal: {e}")
+        
+        return signal_id
+    
+    def update_decision(
+        self,
+        signal_id: str,
+        was_accepted: bool,
+        rejected_reason: Optional[str] = None,
+        planned_trade: Optional[Dict] = None,
+    ):
+        """Обновляет результат проверки RiskManager."""
+        
+        planned_trade = planned_trade or {}
+        
+        updates = {
+            'was_traded': int(was_accepted),
+            'rejected_reason': rejected_reason,
+            'planned_size_usd': planned_trade.get('size_usd'),
+            'planned_sl_pct': planned_trade.get('sl_pct'),
+            'planned_tp_pct': planned_trade.get('tp_pct'),
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+        }
+        
+        try:
+            with self._get_conn() as conn:
+                set_clause = ', '.join([f"{k} = ?" for k in updates.keys()])
+                conn.execute(
+                    f"UPDATE signal_features SET {set_clause} WHERE signal_id = ?",
+                    (*updates.values(), signal_id)
+                )
+                conn.commit()
+            
+            status = "✅ ACCEPTED" if was_accepted else f"❌ REJECTED ({rejected_reason})"
+            logger.info(f"?? Decision: {signal_id[:8]} → {status}")
+        
+        except Exception as e:
+            logger.error(f"Failed to update decision: {e}")
+    
+    def update_outcome(self, signal_id: str, outcome: Dict):
+        """Обновляет результат закрытия позиции."""
+        
+        updates = {
+            'entry_price': outcome.get('entry_price'),
+            'exit_price': outcome.get('exit_price'),
+            'actual_size_usd': outcome.get('actual_size_usd'),
+            'pnl_pct': outcome.get('pnl_pct'),
+            'pnl_usd': outcome.get('pnl_usd'),
+            'exit_reason': outcome.get('exit_reason'),
+            'duration_sec': outcome.get('duration_sec'),
+            'max_adverse_excursion_pct': outcome.get('mae_pct'),
+            'max_favorable_excursion_pct': outcome.get('mfe_pct'),
+            'slippage_entry_bps': outcome.get('slippage_entry_bps'),
+            'slippage_exit_bps': outcome.get('slippage_exit_bps'),
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+        }
+        
+        updates = {k: v for k, v in updates.items() if v is not None}
+        
+        try:
+            with self._get_conn() as conn:
+                set_clause = ', '.join([f"{k} = ?" for k in updates.keys()])
+                conn.execute(
+                    f"UPDATE signal_features SET {set_clause} WHERE signal_id = ?",
+                    (*updates.values(), signal_id)
+                )
+                conn.commit()
+            
+            logger.info(
+                f"?? Outcome: {signal_id[:8]} → "
+                f"PnL={outcome.get('pnl_pct', 0):.2f}% | "
+                f"{outcome.get('exit_reason')} | "
+                f"{outcome.get('duration_sec', 0)//60}min"
+            )
+        
+        except Exception as e:
+            logger.error(f"Failed to update outcome: {e}")
+    
+    def get_stats(self) -> Dict:
+        """Статистика по БД."""
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.execute("""
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN was_traded = 1 THEN 1 ELSE 0 END) as traded,
+                        SUM(CASE WHEN was_traded = 0 THEN 1 ELSE 0 END) as rejected,
+                        SUM(CASE WHEN was_traded IS NULL THEN 1 ELSE 0 END) as pending,
+                        AVG(CASE WHEN pnl_pct IS NOT NULL THEN pnl_pct END) as avg_pnl,
+                        SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) * 100.0 / 
+                            NULLIF(SUM(CASE WHEN pnl_pct IS NOT NULL THEN 1 ELSE 0 END), 0) as win_rate
+                    FROM signal_features
+                """)
+                row = cursor.fetchone()
+                
+                return {
+                    'total_signals': row['total'] or 0,
+                    'traded': row['traded'] or 0,
+                    'rejected': row['rejected'] or 0,
+                    'pending': row['pending'] or 0,
+                    'avg_pnl_pct': round(row['avg_pnl'] or 0, 3),
+                    'win_rate': round(row['win_rate'] or 0, 1),
+                }
+        except Exception as e:
+            logger.error(f"Failed to get stats: {e}")
+            return {}
