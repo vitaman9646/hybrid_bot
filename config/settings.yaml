@@ -86,9 +86,9 @@ strategy:
 
   momentum_fade:
     window_s: 8.0
-    fade_threshold: 0.25
-    min_profit_pct: 0.10
-    confirm_s: 3.0
+    fade_threshold: 0.20
+    min_profit_pct: 0.30
+    confirm_s: 5.0
     min_ticks: 10
     max_loss_pct: 0.05
 
@@ -96,7 +96,7 @@ strategy:
 
 risk:
   risk_per_trade_pct: 1.5
-  position_pct: 15.0
+  position_pct: 45.0
   sl_pct_default: 1.2
   min_size_usdt: 5.0
   max_size_usdt: 200.0

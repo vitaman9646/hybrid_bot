@@ -449,6 +449,8 @@ class PositionManager:
 
             pos.close_price = current_price or pos.entry_price
             pos.realized_pnl = self._calc_pnl(pos)
+            if hasattr(self._executor, 'update_paper_balance'):
+                self._executor.update_paper_balance(pos.realized_pnl)
 
             # Telegram: уведомление о закрытии
             if self._alerts is not None:
@@ -475,7 +477,7 @@ class PositionManager:
             self._stats['total_closed'] += 1
             if reason == 'sl':
                 self._stats['sl_hits'] += 1
-            elif reason == 'tp':
+            elif reason in ('tp', 'momentum_fade', 'opposite_exit'):
                 self._stats['tp_hits'] += 1
             elif reason == 'manual':
                 self._stats['manual_closes'] += 1

@@ -44,7 +44,7 @@ class OrderExecutor:
         self._paper_mode = config.get('paper_mode', False)
         if self._paper_mode:
             logger.info('[PAPER] Paper trading mode ON — ордера не отправляются на биржу')
-        self._paper_balance = 1000.0
+        self._paper_balance = 100.0
 
         # Retry
         self._max_retries = config.get('max_retries', 3)
@@ -512,9 +512,13 @@ class OrderExecutor:
             'slippage_entries': len(self._slippage_log),
       }
 
+    def update_paper_balance(self, pnl: float) -> None:
+        if getattr(self, '_paper_mode', False):
+            self._paper_balance = max(0.0, self._paper_balance + pnl)
+
     async def get_balance(self) -> float:
         if getattr(self, '_paper_mode', False):
-            return getattr(self, '_paper_balance', 1000.0)
+            return getattr(self, '_paper_balance', 100.0)
         """Получить доступный баланс USDT."""
         try:
             from functools import partial

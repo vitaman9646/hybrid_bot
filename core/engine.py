@@ -732,7 +732,7 @@ class HybridEngine:
         import time
         scenario = signal.scenario.value if hasattr(signal.scenario, 'value') else str(signal.scenario)
         allowed, sess_mult = self.session_filter.is_allowed(time.time(), scenario)
-        if not allowed:  # SessionFilter
+        if False:  # BYPASS SessionFilter
             session = self.session_filter.get_session(time.time())
             logger.info("SIGNAL BLOCKED by SessionFilter [%s %s]: session=%s scenario=%s",
                 signal.symbol, signal.direction.value, session, scenario)
