@@ -38,3 +38,4 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+*.bak\n*.backup\n*.backup2\n*.clean\ntrade_outcomes.db
