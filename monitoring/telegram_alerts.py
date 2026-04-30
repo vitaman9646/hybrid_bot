@@ -154,7 +154,7 @@ class TelegramAlerts:
     ):
         if not self.alert_on_trade:
             return
-        emoji = "??" if direction == 'long' else "??"
+        emoji = "🟢" if direction == 'long' else "🔴"
         arrow = "⬆️ LONG" if direction == 'long' else "⬇️ SHORT"
         sl_pct = abs(entry_price - sl_price) / entry_price * 100
         tp_pct = abs(tp_price - entry_price) / entry_price * 100
@@ -195,9 +195,9 @@ class TelegramAlerts:
         pnl_pct = pnl_usdt / size_usdt * 100 if size_usdt > 0 else 0
         pnl_emoji = "✅" if pnl_usdt >= 0 else "❌"
         reason_emoji = {
-            'tp': '??', 'sl': '??', 'time_stop': '⏱️',
-            'momentum_fade': '??', 'opposite_exit': '??',
-            'max_drawdown': '⚠️', 'manual': '??️',
+            'tp': '🎯', 'sl': '🛑', 'time_stop': '⏱️',
+            'momentum_fade': '💨', 'opposite_exit': '🔄',
+            'max_drawdown': '⚠️', 'manual': '🖐️',
         }.get(reason, '❓')
 
         dur_str = f"{duration_sec//60}m {duration_sec%60}s" if duration_sec else "?"
